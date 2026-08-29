@@ -18,6 +18,10 @@ jobs:
           python-version: "3.13"
       - name: Run deterministic simulator tests
         run: python -m unittest discover -s tests -v
+      - name: Validate report and publisher entrypoints
+        run: |
+          python -m compileall -q src tests
+          sh -n scripts/publish-pilot-if-ready.sh
       - name: Run full-year deterministic policy smoke
         env:
           PYTHONPATH: src
@@ -25,4 +29,3 @@ jobs:
           python -m theatre_business_bench.cli simulate-policy --arm control --seed 101 --days 365 > /tmp/control.json
           python -m theatre_business_bench.cli simulate-policy --arm theatre --seed 101 --days 365 > /tmp/theatre.json
           python -c 'import json; assert json.load(open("/tmp/control.json"))["score"]["days_survived"] == 365; assert json.load(open("/tmp/theatre.json"))["score"]["days_survived"] == 365'
-
