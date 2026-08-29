@@ -8,6 +8,10 @@ if [ ! -f "$pair_dir/result.json" ] || [ -f "$marker" ]; then
   exit 0
 fi
 
+# Publication is fail-closed: replay and confront the completed evidence before
+# starting the reporting agent or creating the exactly-once marker.
+PYTHONPATH=src python3 -m theatre_business_bench.cli verify-pair --pair "$pair_dir" >/dev/null
+
 openclaw agent \
   --agent main \
   --session-key agent:main:theatre-business-bench-pilot-publisher \

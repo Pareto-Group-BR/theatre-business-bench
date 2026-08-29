@@ -8,6 +8,7 @@ from typing import Any
 from .policies import heuristic_actions
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
+from .verify import verify_pair
 
 
 def emit(value: Any) -> None:
@@ -86,6 +87,10 @@ def create_pair_cmd(args: argparse.Namespace) -> None:
 
 
 def pair_batch(args: argparse.Namespace) -> None:
+    integrity = verify_pair(Path(args.pair))
+    if integrity["status"] != "passed":
+        emit({"status": "integrity_failed", "verification": integrity})
+        raise SystemExit(1)
     results = []
     for _ in range(args.max_role_calls):
         result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
@@ -111,6 +116,13 @@ def pair_status(args: argparse.Namespace) -> None:
         },
         "result": read_json(pair / "result.json") if (pair / "result.json").exists() else None,
     })
+
+
+def verify_pair_cmd(args: argparse.Namespace) -> None:
+    result = verify_pair(Path(args.pair), Path(args.ledger) if args.ledger else None)
+    emit(result)
+    if result["status"] != "passed":
+        raise SystemExit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
     pair_show = sub.add_parser("pair-status", help="inspect both arms of a pair")
     pair_show.add_argument("--pair", required=True)
     pair_show.set_defaults(func=pair_status)
+
+    pair_verify = sub.add_parser("verify-pair", help="replay and audit a durable paired run")
+    pair_verify.add_argument("--pair", required=True)
+    pair_verify.add_argument("--ledger", help="override the global provider-usage ledger path")
+    pair_verify.set_defaults(func=verify_pair_cmd)
     return parser
 
 

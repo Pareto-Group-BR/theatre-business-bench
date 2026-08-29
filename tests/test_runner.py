@@ -4,14 +4,19 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from theatre_business_bench.runner import TokenBudget, create_pair, create_run, read_json
 from theatre_business_bench.transport import ModelTransportError, parse_json_object
+from theatre_business_bench.cli import pair_batch
 
 
 class RunnerTests(unittest.TestCase):
@@ -52,6 +57,17 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(read_json(control / "manifest.json")["seed"], 91)
             self.assertEqual(read_json(theatre / "manifest.json")["seed"], 91)
             self.assertEqual(pair["next_arm"], "control")
+
+    def test_pair_batch_refuses_to_resume_failed_integrity(self) -> None:
+        report = {"status": "failed", "errors": ["replay hash mismatch"]}
+        with (
+            patch("theatre_business_bench.cli.verify_pair", return_value=report),
+            patch("theatre_business_bench.cli.step_pair") as step,
+            redirect_stdout(StringIO()),
+        ):
+            with self.assertRaises(SystemExit):
+                pair_batch(Namespace(pair="ignored", max_role_calls=1, daily_token_budget=500_000))
+        step.assert_not_called()
 
 
 if __name__ == "__main__":
