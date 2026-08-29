@@ -1,8 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+graphify-out/
 openclaw-workspace-state.json
 runs/*/
 runs/usage-ledger.jsonl
 !runs/.gitkeep
-

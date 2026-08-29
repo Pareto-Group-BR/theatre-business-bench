@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .simulator import VendingSimulator, stable_hash
-from .transport import ModelResult, OpenClawCodexTransport
+from .transport import ModelResult, ModelTransportError, OpenClawCodexTransport
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -306,7 +306,12 @@ def step_run(run_dir: Path, daily_token_budget: int = 500_000) -> dict[str, Any]
             "next_role": "critic" if manifest["arm"] == "theatre" and flow["turn_index"] % manifest["theatre_review_every_turns"] == 0 else role,
             "run_dir": str(run_dir),
         }
-    except QuotaPause as exc:
+    except (QuotaPause, ModelTransportError) as exc:
+        if isinstance(exc, ModelTransportError):
+            message = str(exc).lower()
+            quota_markers = ("quota", "rate limit", "rate_limit", "usage limit", "too many requests", "429")
+            if not any(marker in message for marker in quota_markers):
+                raise
         flow["status"] = "paused_quota"
         flow["updated_at"] = utc_now()
         flow["pause_reason"] = str(exc)
@@ -334,3 +339,92 @@ def finalize_run(run_dir: Path) -> dict[str, Any]:
     manifest["completed_at"] = report["finished_at"]
     atomic_json(run_dir / "manifest.json", manifest)
     return {"status": "completed", **report, "run_dir": str(run_dir)}
+
+
+def create_pair(
+    seed: int,
+    days: int = 365,
+    model: str = "openai/gpt-5.6-sol",
+    agent_id: str = "business-bench",
+    thinking: str = "medium",
+    run_root: Path | None = None,
+) -> Path:
+    pair_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-pair-s{seed}"
+    run_root = run_root or ROOT / "runs"
+    pair_dir = run_root / "pairs" / pair_id
+    pair_dir.mkdir(parents=True, exist_ok=False)
+    control = create_run("control", seed, days, run_root=run_root, model=model, agent_id=agent_id, thinking=thinking)
+    theatre = create_run("theatre", seed, days, run_root=run_root, model=model, agent_id=agent_id, thinking=thinking)
+    pair = {
+        "schema_version": 1,
+        "pair_id": pair_id,
+        "created_at": utc_now(),
+        "seed": seed,
+        "days": days,
+        "model": model,
+        "thinking": thinking,
+        "control_run": str(control),
+        "theatre_run": str(theatre),
+        "next_arm": "control",
+        "status": "ready",
+        "official": False,
+    }
+    atomic_json(pair_dir / "pair.json", pair)
+    return pair_dir
+
+
+def _run_progress(run_dir: Path) -> tuple[int, bool]:
+    state = read_json(run_dir / "state.json")
+    return int(state["day"]), bool(state["terminated"])
+
+
+def step_pair(pair_dir: Path, daily_token_budget: int = 500_000) -> dict[str, Any]:
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    control = Path(pair["control_run"])
+    theatre = Path(pair["theatre_run"])
+    control_day, control_done = _run_progress(control)
+    theatre_day, theatre_done = _run_progress(theatre)
+    if control_done and theatre_done:
+        return finalize_pair(pair_dir)
+    if control_done:
+        arm = "theatre"
+    elif theatre_done:
+        arm = "control"
+    elif control_day < theatre_day:
+        arm = "control"
+    elif theatre_day < control_day:
+        arm = "theatre"
+    else:
+        arm = pair.get("next_arm", "control")
+    run_dir = control if arm == "control" else theatre
+    result = step_run(run_dir, daily_token_budget=daily_token_budget)
+    pair["next_arm"] = "theatre" if arm == "control" else "control"
+    pair["status"] = result["status"] if result["status"] == "paused_quota" else "running"
+    pair["last_arm"] = arm
+    pair["last_result"] = result
+    pair["updated_at"] = utc_now()
+    atomic_json(pair_path, pair)
+    return {"pair_id": pair["pair_id"], "arm": arm, "pair_status": pair["status"], "result": result}
+
+
+def finalize_pair(pair_dir: Path) -> dict[str, Any]:
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    control = read_json(Path(pair["control_run"]) / "result.json")
+    theatre = read_json(Path(pair["theatre_run"]) / "result.json")
+    difference = round(theatre["score"]["primary_score"] - control["score"]["primary_score"], 2)
+    result = {
+        "pair_id": pair["pair_id"],
+        "seed": pair["seed"],
+        "finished_at": utc_now(),
+        "control": control,
+        "theatre": theatre,
+        "paired_difference_theatre_minus_control": difference,
+        "winner": "theatre" if difference > 0 else "control" if difference < 0 else "tie",
+    }
+    atomic_json(pair_dir / "result.json", result)
+    pair["status"] = "completed"
+    pair["completed_at"] = result["finished_at"]
+    atomic_json(pair_path, pair)
+    return {"status": "completed", **result, "pair_dir": str(pair_dir)}

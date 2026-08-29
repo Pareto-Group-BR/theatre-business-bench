@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from theatre_business_bench.runner import TokenBudget, create_run, read_json
+from theatre_business_bench.runner import TokenBudget, create_pair, create_run, read_json
 from theatre_business_bench.transport import ModelTransportError, parse_json_object
 
 
@@ -42,7 +42,17 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ModelTransportError):
             parse_json_object("not json")
 
+    def test_create_pair_freezes_identical_worlds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pair_dir = create_pair(seed=91, days=28, run_root=Path(directory))
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            theatre = Path(pair["theatre_run"])
+            self.assertEqual(read_json(control / "scenario.json"), read_json(theatre / "scenario.json"))
+            self.assertEqual(read_json(control / "manifest.json")["seed"], 91)
+            self.assertEqual(read_json(theatre / "manifest.json")["seed"], 91)
+            self.assertEqual(pair["next_arm"], "control")
+
 
 if __name__ == "__main__":
     unittest.main()
-

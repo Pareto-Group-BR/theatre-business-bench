@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .policies import heuristic_actions
-from .runner import DEFAULT_SCENARIO, ROOT, create_run, read_json, step_run
+from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 
 
@@ -80,6 +80,39 @@ def status(args: argparse.Namespace) -> None:
     emit(result)
 
 
+def create_pair_cmd(args: argparse.Namespace) -> None:
+    path = create_pair(args.seed, args.days, args.model, args.agent, args.thinking)
+    emit({"status": "created", "pair_dir": str(path), "pair": read_json(path / "pair.json")})
+
+
+def pair_batch(args: argparse.Namespace) -> None:
+    results = []
+    for _ in range(args.max_role_calls):
+        result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
+        results.append(result)
+        status_value = result.get("status") or result.get("pair_status")
+        if status_value in ("completed", "paused_quota"):
+            break
+    emit({"calls_attempted": len(results), "last": results[-1], "history": results})
+
+
+def pair_status(args: argparse.Namespace) -> None:
+    pair = Path(args.pair)
+    manifest = read_json(pair / "pair.json")
+    emit({
+        "pair": manifest,
+        "control": {
+            "flow": read_json(Path(manifest["control_run"]) / "flow.json"),
+            "state": read_json(Path(manifest["control_run"]) / "state.json"),
+        },
+        "theatre": {
+            "flow": read_json(Path(manifest["theatre_run"]) / "flow.json"),
+            "state": read_json(Path(manifest["theatre_run"]) / "state.json"),
+        },
+        "result": read_json(pair / "result.json") if (pair / "result.json").exists() else None,
+    })
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -114,6 +147,24 @@ def build_parser() -> argparse.ArgumentParser:
     status_cmd = sub.add_parser("status", help="inspect a durable run")
     status_cmd.add_argument("--run", required=True)
     status_cmd.set_defaults(func=status)
+
+    pair_create = sub.add_parser("create-pair", help="create paired control and Theatre runs")
+    pair_create.add_argument("--seed", type=int, required=True)
+    pair_create.add_argument("--days", type=int, default=365)
+    pair_create.add_argument("--model", default="openai/gpt-5.6-sol")
+    pair_create.add_argument("--agent", default="business-bench")
+    pair_create.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
+    pair_create.set_defaults(func=create_pair_cmd)
+
+    pair_run = sub.add_parser("pair-batch", help="advance a pair fairly until quota or call limit")
+    pair_run.add_argument("--pair", required=True)
+    pair_run.add_argument("--max-role-calls", type=int, default=10)
+    pair_run.add_argument("--daily-token-budget", type=int, default=500_000)
+    pair_run.set_defaults(func=pair_batch)
+
+    pair_show = sub.add_parser("pair-status", help="inspect both arms of a pair")
+    pair_show.add_argument("--pair", required=True)
+    pair_show.set_defaults(func=pair_status)
     return parser
 
 
@@ -124,4 +175,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

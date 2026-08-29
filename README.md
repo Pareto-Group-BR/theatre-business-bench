@@ -24,18 +24,18 @@ All model calls go through the OpenClaw Gateway authenticated with ChatGPT/Codex
 ```bash
 python -m unittest discover -s tests -v
 PYTHONPATH=src python -m theatre_business_bench.cli simulate-policy --arm control --seed 101 --days 365
-PYTHONPATH=src python -m theatre_business_bench.cli create-run --arm control --seed 101 --days 365
-PYTHONPATH=src python -m theatre_business_bench.cli step --run runs/<run-id>
+PYTHONPATH=src python -m theatre_business_bench.cli create-pair --seed 101 --days 365
+PYTHONPATH=src python -m theatre_business_bench.cli pair-batch --pair runs/pairs/<pair-id> --max-role-calls 10
+PYTHONPATH=src python -m theatre_business_bench.cli pair-status --pair runs/pairs/<pair-id>
 ```
 
-`simulate-policy` uses deterministic built-in policies to validate the economics without consuming model quota. `step` invokes the configured Codex subscription transport once and persists both state and token usage.
+`simulate-policy` uses deterministic built-in policies to validate the economics without consuming model quota. `pair-batch` alternates the paired arms by simulated-day progress, invokes the configured Codex subscription transport, and stops cleanly at the local or provider quota boundary. State and provider-reported token use are persisted after every role call.
 
 ## Honest status
 
-The simulator and transport are under active construction. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.
+The simulator, subscription transport, 28-day paired smoke, and quota-safe paired runner exist. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.
 
 Sources:
 
 - https://andonlabs.com/evals/vending-bench-2
 - https://arxiv.org/abs/2502.15840
-
