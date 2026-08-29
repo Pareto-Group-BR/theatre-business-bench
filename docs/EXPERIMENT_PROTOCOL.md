@@ -52,5 +52,5 @@ Final liquid cash after a virtual charge of US$100 per million output tokens.
 - one paired 365-day pilot complete;
 - prompts and scenario reviewed and frozen;
 - public dashboard displays exact hashes and caveats;
+- completed-pair report renderer passes without mutating evidence and publishes exact verified numbers;
 - seeds and arm order pre-registered.
-

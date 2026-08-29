@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .policies import heuristic_actions
+from .report import ReportGateError, build_executive_report, write_report_bundle
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 from .verify import verify_pair
@@ -125,6 +126,25 @@ def verify_pair_cmd(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def render_report_cmd(args: argparse.Namespace) -> None:
+    try:
+        report = build_executive_report(
+            Path(args.pair),
+            Path(args.ledger) if args.ledger else None,
+        )
+        write_report_bundle(
+            Path(args.pair),
+            report,
+            json_out=Path(args.json_out) if args.json_out else None,
+            markdown_out=Path(args.markdown_out) if args.markdown_out else None,
+            html_out=Path(args.html_out) if args.html_out else None,
+        )
+    except ReportGateError as exc:
+        emit({"status": "report_gate_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit(report)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -182,6 +202,17 @@ def build_parser() -> argparse.ArgumentParser:
     pair_verify.add_argument("--pair", required=True)
     pair_verify.add_argument("--ledger", help="override the global provider-usage ledger path")
     pair_verify.set_defaults(func=verify_pair_cmd)
+
+    pair_report = sub.add_parser(
+        "render-report",
+        help="render deterministic executive evidence from a completed verified pair",
+    )
+    pair_report.add_argument("--pair", required=True)
+    pair_report.add_argument("--ledger", help="override the global provider-usage ledger path")
+    pair_report.add_argument("--json-out", help="write the canonical machine-readable report")
+    pair_report.add_argument("--markdown-out", help="write the executive Markdown report")
+    pair_report.add_argument("--html-out", help="write the standalone executive HTML report")
+    pair_report.set_defaults(func=render_report_cmd)
     return parser
 
 

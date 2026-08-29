@@ -223,6 +223,7 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
     runs: dict[str, dict[str, Any]] = {}
     manifests: dict[str, dict[str, Any]] = {}
     scenarios: dict[str, dict[str, Any]] = {}
+    run_results: dict[str, dict[str, Any]] = {}
     for arm in ("control", "theatre"):
         raw_path = pair.get(f"{arm}_run")
         if not isinstance(raw_path, str):
@@ -238,6 +239,8 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             manifests[arm] = read_json(run_dir / "manifest.json")
         if (run_dir / "scenario.json").is_file():
             scenarios[arm] = read_json(run_dir / "scenario.json")
+        if (run_dir / "result.json").is_file():
+            run_results[arm] = read_json(run_dir / "result.json")
 
     if set(manifests) == {"control", "theatre"}:
         for field in ("seed", "model", "thinking", "scenario_hash", "decision_period_days"):
@@ -262,6 +265,15 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
         "primary_score_if_stopped_now" in runs.get(arm, {}) for arm in ("control", "theatre")
     ):
         result = read_json(pair_result)
+        if pair.get("status") != "completed":
+            errors.append("pair: result exists but pair status is not completed")
+        for arm in ("control", "theatre"):
+            if arm not in run_results:
+                errors.append(f"pair: final {arm} run result is missing")
+            elif result.get(arm) != run_results[arm]:
+                errors.append(f"pair: embedded {arm} result mismatch")
+            if manifests.get(arm, {}).get("status") != "completed":
+                errors.append(f"pair: final {arm} manifest is not completed")
         expected_difference = round(
             runs["theatre"]["primary_score_if_stopped_now"]
             - runs["control"]["primary_score_if_stopped_now"],
