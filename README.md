@@ -32,7 +32,7 @@ PYTHONPATH=src python -m theatre_business_bench.cli verify-pair --pair runs/pair
 
 `simulate-policy` uses deterministic built-in policies to validate the economics without consuming model quota. `pair-batch` alternates the paired arms by simulated-day progress, invokes the configured Codex subscription transport, and stops cleanly at the local or provider quota boundary. State and provider-reported token use are persisted after every role call.
 
-`verify-pair` is read-only. It replays every submitted business action from the frozen scenario, confronts turn and final-state hashes, validates provider usage against model decisions and the global ledger, recalculates the economic score, and checks control/Theatre parity. It exits non-zero on any divergence and is safe to run while a pair is paused.
+`verify-pair` is read-only. It replays every submitted business action from the frozen scenario, confronts turn and final-state hashes, validates provider usage against model decisions and the global ledger, recalculates the economic score, and checks control/Theatre parity. It exits non-zero on any divergence and is safe to run while a pair is paused. The same gate runs automatically before every `pair-batch` resume and before final publication.
 
 ## Honest status
 

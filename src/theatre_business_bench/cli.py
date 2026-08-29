@@ -87,6 +87,10 @@ def create_pair_cmd(args: argparse.Namespace) -> None:
 
 
 def pair_batch(args: argparse.Namespace) -> None:
+    integrity = verify_pair(Path(args.pair))
+    if integrity["status"] != "passed":
+        emit({"status": "integrity_failed", "verification": integrity})
+        raise SystemExit(1)
     results = []
     for _ in range(args.max_role_calls):
         result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
