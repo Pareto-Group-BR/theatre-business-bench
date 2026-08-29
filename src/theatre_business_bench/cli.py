@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+from .policies import heuristic_actions
+from .runner import DEFAULT_SCENARIO, ROOT, create_run, read_json, step_run
+from .simulator import VendingSimulator, stable_hash
+
+
+def emit(value: Any) -> None:
+    print(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False))
+
+
+def simulate_policy(args: argparse.Namespace) -> None:
+    scenario = read_json(DEFAULT_SCENARIO)
+    scenario["days"] = args.days
+    simulator = VendingSimulator(scenario, args.seed)
+    turns = []
+    while not simulator.state["terminated"]:
+        before = simulator.state["day"]
+        actions = heuristic_actions(simulator.public_view(), arm=args.arm)
+        applied = simulator.apply_turn(actions)
+        turns.append({
+            "turn": len(turns),
+            "day_before": before,
+            "day_after": simulator.state["day"],
+            "accepted": len(applied.accepted),
+            "rejected": len(applied.rejected),
+            "state_hash": applied.state_hash,
+        })
+    emit({
+        "mode": "deterministic_policy_validation",
+        "arm": args.arm,
+        "seed": args.seed,
+        "turns": len(turns),
+        "score": simulator.score(),
+        "final_state_hash": stable_hash(simulator.state),
+        "final_state": simulator.public_view() if args.include_state else None,
+    })
+
+
+def create(args: argparse.Namespace) -> None:
+    path = create_run(
+        arm=args.arm,
+        seed=args.seed,
+        days=args.days,
+        model=args.model,
+        agent_id=args.agent,
+        thinking=args.thinking,
+    )
+    emit({"status": "created", "run_dir": str(path), "manifest": read_json(path / "manifest.json")})
+
+
+def step(args: argparse.Namespace) -> None:
+    emit(step_run(Path(args.run), daily_token_budget=args.daily_token_budget))
+
+
+def batch(args: argparse.Namespace) -> None:
+    results = []
+    for _ in range(args.max_role_calls):
+        result = step_run(Path(args.run), daily_token_budget=args.daily_token_budget)
+        results.append(result)
+        if result["status"] in ("completed", "paused_quota"):
+            break
+    emit({"calls_attempted": len(results), "last": results[-1], "history": results})
+
+
+def status(args: argparse.Namespace) -> None:
+    run = Path(args.run)
+    result = {
+        "manifest": read_json(run / "manifest.json"),
+        "flow": read_json(run / "flow.json"),
+        "state": read_json(run / "state.json"),
+    }
+    if (run / "result.json").exists():
+        result["result"] = read_json(run / "result.json")
+    emit(result)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="business-bench")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    policy = sub.add_parser("simulate-policy", help="validate economics without model calls")
+    policy.add_argument("--arm", choices=("control", "theatre"), required=True)
+    policy.add_argument("--seed", type=int, required=True)
+    policy.add_argument("--days", type=int, default=365)
+    policy.add_argument("--include-state", action="store_true")
+    policy.set_defaults(func=simulate_policy)
+
+    create_cmd = sub.add_parser("create-run", help="create a durable Codex benchmark run")
+    create_cmd.add_argument("--arm", choices=("control", "theatre"), required=True)
+    create_cmd.add_argument("--seed", type=int, required=True)
+    create_cmd.add_argument("--days", type=int, default=365)
+    create_cmd.add_argument("--model", default="openai/gpt-5.6-sol")
+    create_cmd.add_argument("--agent", default="business-bench")
+    create_cmd.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
+    create_cmd.set_defaults(func=create)
+
+    step_cmd = sub.add_parser("step", help="execute one durable role call or business turn")
+    step_cmd.add_argument("--run", required=True)
+    step_cmd.add_argument("--daily-token-budget", type=int, default=500_000)
+    step_cmd.set_defaults(func=step)
+
+    batch_cmd = sub.add_parser("batch", help="execute several role calls, stopping at quota")
+    batch_cmd.add_argument("--run", required=True)
+    batch_cmd.add_argument("--max-role-calls", type=int, default=10)
+    batch_cmd.add_argument("--daily-token-budget", type=int, default=500_000)
+    batch_cmd.set_defaults(func=batch)
+
+    status_cmd = sub.add_parser("status", help="inspect a durable run")
+    status_cmd.add_argument("--run", required=True)
+    status_cmd.set_defaults(func=status)
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
+

@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from theatre_business_bench.runner import TokenBudget, create_run, read_json
+from theatre_business_bench.transport import ModelTransportError, parse_json_object
+
+
+class RunnerTests(unittest.TestCase):
+    def test_create_run_freezes_scenario_and_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = create_run("control", seed=77, days=35, run_root=Path(directory), agent_id="business-bench")
+            manifest = read_json(run / "manifest.json")
+            self.assertEqual(manifest["arm"], "control")
+            self.assertEqual(manifest["seed"], 77)
+            self.assertEqual(read_json(run / "scenario.json")["days"], 35)
+            self.assertEqual(set(manifest["prompt_hashes"]), {"control", "critic", "planner", "actor"})
+            self.assertTrue((run / "flow.json").exists())
+
+    def test_token_budget_reads_provider_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "usage.jsonl"
+            today = datetime.now(timezone.utc).date().isoformat()
+            ledger.write_text(
+                json.dumps({"timestamp": today + "T00:00:00+00:00", "usage": {"total": 1200}}) + "\n" +
+                json.dumps({"timestamp": "2020-01-01T00:00:00+00:00", "usage": {"total": 9999}}) + "\n"
+            )
+            budget = TokenBudget(ledger, daily_limit=30_000, reserve_per_call=25_000)
+            self.assertEqual(budget.used_today(), 1200)
+            budget.assert_call_allowed()
+
+    def test_parse_json_object_handles_fence(self) -> None:
+        self.assertEqual(parse_json_object('```json\n{"ok": true}\n```'), {"ok": True})
+        with self.assertRaises(ModelTransportError):
+            parse_json_object("not json")
+
+
+if __name__ == "__main__":
+    unittest.main()
+

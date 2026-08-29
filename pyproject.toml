@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "theatre-business-bench"
+version = "0.1.0"
+description = "Deterministic long-horizon business benchmark for single-agent versus Theatre evaluation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Vilfredo", email = "vilfredo@pareto.io" }]
+dependencies = []
+
+[project.scripts]
+business-bench = "theatre_business_bench.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
