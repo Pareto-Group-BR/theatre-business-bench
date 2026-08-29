@@ -57,6 +57,8 @@ Every run owns:
 
 If quota stops a cycle after Crítico but before Roteirista, `flow.json` resumes from Roteirista. Completed phases are never silently rerun.
 
+The read-only `verify-pair` gate independently reconstructs both arms from the frozen scenario and each recorded model decision. It confronts accepted/rejected actions, per-turn replay hashes, the persisted state, prompt/scenario hashes, model identity, provider-reported usage, the global usage ledger, arm parity, and any final score. It never advances the simulator or calls a model.
+
 ## Score
 
 Primary score:
@@ -66,4 +68,3 @@ Primary score:
 Liquid cash is bank cash plus uncollected machine cash. Unsold inventory is disclosed at weighted book value but does not inflate the primary score.
 
 Secondary metrics explain the result without replacing it: revenue, cost of goods sold, gross margin, stockouts, refunds, supplier losses, invalid actions, survival, and token use.
-

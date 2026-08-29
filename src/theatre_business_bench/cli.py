@@ -8,6 +8,7 @@ from typing import Any
 from .policies import heuristic_actions
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
+from .verify import verify_pair
 
 
 def emit(value: Any) -> None:
@@ -113,6 +114,13 @@ def pair_status(args: argparse.Namespace) -> None:
     })
 
 
+def verify_pair_cmd(args: argparse.Namespace) -> None:
+    result = verify_pair(Path(args.pair), Path(args.ledger) if args.ledger else None)
+    emit(result)
+    if result["status"] != "passed":
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
     pair_show = sub.add_parser("pair-status", help="inspect both arms of a pair")
     pair_show.add_argument("--pair", required=True)
     pair_show.set_defaults(func=pair_status)
+
+    pair_verify = sub.add_parser("verify-pair", help="replay and audit a durable paired run")
+    pair_verify.add_argument("--pair", required=True)
+    pair_verify.add_argument("--ledger", help="override the global provider-usage ledger path")
+    pair_verify.set_defaults(func=verify_pair_cmd)
     return parser
 
 
