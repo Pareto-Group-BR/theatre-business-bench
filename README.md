@@ -72,3 +72,7 @@ Sources:
 
 - https://andonlabs.com/evals/vending-bench-2
 - https://arxiv.org/abs/2502.15840
+
+AI handoff:
+
+- [`docs/AI_HANDOFF_VENDING_MACHINE.md`](docs/AI_HANDOFF_VENDING_MACHINE.md) — contexto autocontido, checkpoint, diagnóstico causal e protocolo seguro para outra IA.
