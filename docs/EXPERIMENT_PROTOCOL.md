@@ -40,7 +40,8 @@ Final liquid cash after a virtual charge of US$100 per million output tokens.
 
 - Model inference uses only the included ChatGPT/Codex subscription route.
 - Every inference records provider-reported tokens.
-- A local UTC-day safety budget pauses new calls before a configurable reserve would be exceeded.
+- The default runner has no invented token ceiling: it continues until the provider reports the real subscription quota or the pair completes.
+- A local UTC-day safety budget remains available only as an explicit diagnostic override; it is disabled by default.
 - Provider rate/quota rejection also pauses the run without changing its state.
 - Work resumes on the next quota window from the persisted phase.
 - Subscription remaining percentage is captured at batch boundaries because the provider does not expose a documented token-equivalent quota denominator.

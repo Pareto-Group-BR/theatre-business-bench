@@ -63,7 +63,7 @@ def make_run_id(arm: str, seed: int) -> str:
 @dataclass
 class TokenBudget:
     ledger_path: Path
-    daily_limit: int
+    daily_limit: int | None = None
     reserve_per_call: int = 25_000
 
     def used_today(self) -> int:
@@ -81,6 +81,8 @@ class TokenBudget:
         return total
 
     def assert_call_allowed(self) -> None:
+        if self.daily_limit is None:
+            return
         used = self.used_today()
         if used + self.reserve_per_call > self.daily_limit:
             raise QuotaPause(
@@ -220,7 +222,7 @@ def _output_tokens(run_dir: Path) -> int:
         return sum(int(json.loads(line)["usage"].get("output", 0)) for line in handle if line.strip())
 
 
-def step_run(run_dir: Path, daily_token_budget: int = 500_000) -> dict[str, Any]:
+def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     manifest = read_json(run_dir / "manifest.json")
     scenario = read_json(run_dir / "scenario.json")
@@ -378,7 +380,7 @@ def _run_progress(run_dir: Path) -> tuple[int, bool]:
     return int(state["day"]), bool(state["terminated"])
 
 
-def step_pair(pair_dir: Path, daily_token_budget: int = 500_000) -> dict[str, Any]:
+def step_pair(pair_dir: Path, daily_token_budget: int | None = None) -> dict[str, Any]:
     pair_path = pair_dir / "pair.json"
     pair = read_json(pair_path)
     control = Path(pair["control_run"])

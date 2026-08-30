@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,8 @@ def step(args: argparse.Namespace) -> None:
 
 def batch(args: argparse.Namespace) -> None:
     results = []
-    for _ in range(args.max_role_calls):
+    calls = range(args.max_role_calls) if args.max_role_calls is not None else itertools.count()
+    for _ in calls:
         result = step_run(Path(args.run), daily_token_budget=args.daily_token_budget)
         results.append(result)
         if result["status"] in ("completed", "paused_quota"):
@@ -93,7 +95,8 @@ def pair_batch(args: argparse.Namespace) -> None:
         emit({"status": "integrity_failed", "verification": integrity})
         raise SystemExit(1)
     results = []
-    for _ in range(args.max_role_calls):
+    calls = range(args.max_role_calls) if args.max_role_calls is not None else itertools.count()
+    for _ in calls:
         result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
         results.append(result)
         status_value = result.get("status") or result.get("pair_status")
@@ -185,13 +188,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     step_cmd = sub.add_parser("step", help="execute one durable role call or business turn")
     step_cmd.add_argument("--run", required=True)
-    step_cmd.add_argument("--daily-token-budget", type=int, default=500_000)
+    step_cmd.add_argument(
+        "--daily-token-budget",
+        type=int,
+        help="optional local safety ceiling; omitted means use the provider's real quota",
+    )
     step_cmd.set_defaults(func=step)
 
-    batch_cmd = sub.add_parser("batch", help="execute several role calls, stopping at quota")
+    batch_cmd = sub.add_parser("batch", help="advance a run until completion or provider quota")
     batch_cmd.add_argument("--run", required=True)
-    batch_cmd.add_argument("--max-role-calls", type=int, default=10)
-    batch_cmd.add_argument("--daily-token-budget", type=int, default=500_000)
+    batch_cmd.add_argument("--max-role-calls", type=int, help="optional diagnostic call cap")
+    batch_cmd.add_argument(
+        "--daily-token-budget",
+        type=int,
+        help="optional local safety ceiling; omitted means use the provider's real quota",
+    )
     batch_cmd.set_defaults(func=batch)
 
     status_cmd = sub.add_parser("status", help="inspect a durable run")
@@ -206,10 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
     pair_create.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
     pair_create.set_defaults(func=create_pair_cmd)
 
-    pair_run = sub.add_parser("pair-batch", help="advance a pair fairly until quota or call limit")
+    pair_run = sub.add_parser("pair-batch", help="advance a pair fairly until completion or provider quota")
     pair_run.add_argument("--pair", required=True)
-    pair_run.add_argument("--max-role-calls", type=int, default=10)
-    pair_run.add_argument("--daily-token-budget", type=int, default=500_000)
+    pair_run.add_argument("--max-role-calls", type=int, help="optional diagnostic call cap")
+    pair_run.add_argument(
+        "--daily-token-budget",
+        type=int,
+        help="optional local safety ceiling; omitted means use the provider's real quota",
+    )
     pair_run.set_defaults(func=pair_batch)
 
     pair_show = sub.add_parser("pair-status", help="inspect both arms of a pair")
