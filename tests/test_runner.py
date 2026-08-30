@@ -42,6 +42,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(budget.used_today(), 1200)
             budget.assert_call_allowed()
 
+    def test_token_budget_is_disabled_when_no_local_limit_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "usage.jsonl"
+            today = datetime.now(timezone.utc).date().isoformat()
+            ledger.write_text(
+                json.dumps({"timestamp": today + "T00:00:00+00:00", "usage": {"total": 9_999_999}}) + "\n"
+            )
+            TokenBudget(ledger).assert_call_allowed()
+
     def test_parse_json_object_handles_fence(self) -> None:
         self.assertEqual(parse_json_object('```json\n{"ok": true}\n```'), {"ok": True})
         with self.assertRaises(ModelTransportError):
