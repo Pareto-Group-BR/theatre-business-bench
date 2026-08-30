@@ -79,7 +79,7 @@
     const renderDiagnostic = data => {
       const d=data.strategic_diagnostic,total=Math.max(1,d.revenue_gap_control_minus_theatre),volume=d.estimated_revenue_gap_volume_effect/total*100,price=d.estimated_revenue_gap_price_mix_effect/total*100;
       document.getElementById('diagnostic-grid').innerHTML=[
-        `<article class="diagnostic-card"><span>Disponibilidade</span><strong>+${pct(d.stockout_rate_gap_theatre_minus_control_pp)} p.p.</strong><p>Ruptura do Theatre acima do agente único; o principal gargalo é produto indisponível.</p></article>`,
+        `<article class="diagnostic-card"><span>Disponibilidade</span><strong>+${new Intl.NumberFormat('pt-BR',{maximumFractionDigits:1}).format(d.stockout_rate_gap_theatre_minus_control_pp)} p.p.</strong><p>Ruptura do Theatre acima do agente único; o principal gargalo é produto indisponível.</p></article>`,
         `<article class="diagnostic-card"><span>Receita não capturada</span><strong>${money(d.revenue_gap_control_minus_theatre)}</strong><p>Cerca de ${pct(volume)} vem de menos unidades e ${pct(price)} de preço/mix.</p></article>`,
         `<article class="diagnostic-card"><span>Execução</span><strong>${number(d.actions_gap_control_minus_theatre)} ações a menos</strong><p>O Theatre vem operando com menos movimentos, apesar de o simulador permitir até 14 por ciclo.</p></article>`,
         `<article class="diagnostic-card"><span>Trajetória</span><strong>liderança desde D${d.sustained_control_gross_profit_lead_from_day}</strong><p>Nos últimos ${number(d.lookback_days)} dias, a diferença de lucro bruto cresceu ${money(d.gross_profit_gap_growth_last_lookback)}.</p></article>`,
