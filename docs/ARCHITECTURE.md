@@ -57,6 +57,14 @@ Every run owns:
 
 If quota stops a cycle after Crítico but before Roteirista, `flow.json` resumes from Roteirista. Completed phases are never silently rerun.
 
+The canonical pilot runner holds a persistent workspace lock for the lifetime
+of `pair-batch`. The file descriptor is inherited by the model-execution child,
+so a scheduler or gateway interruption cannot make a still-running batch look
+idle. Checkpoint publication is a separate idempotent process that acquires the
+same lock, verifies the replay, renders the cockpit atomically, and pushes only
+when the verified JSON changed. It may therefore recover observability after a
+detached batch exits without starting inference or racing mutable evidence.
+
 The read-only `verify-pair` gate independently reconstructs both arms from the frozen scenario and each recorded model decision. It confronts accepted/rejected actions, per-turn replay hashes, the persisted state, prompt/scenario hashes, model identity, provider-reported usage, the global usage ledger, arm parity, and any final score. It never advances the simulator or calls a model. `pair-batch` runs it before resuming, and the completion publisher runs it again before exposing a result; divergence stops both paths without changing the checkpoint.
 
 The publication boundary is also deterministic. `render-report` consumes only a completed pair after `verify-pair` passes, confronts the embedded pair result with both exact run results, and produces a canonical JSON report plus derived Markdown and standalone HTML. It refuses partial checkpoints and refuses output paths inside the immutable evidence directory. The completion publisher renders these artifacts before asking the reporting agent to publish them; a durable publication marker is accepted only after the agent confirms push, green CI/Pages, roadmap evidence, and the final executive communication.

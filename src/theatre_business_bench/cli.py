@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from .policies import heuristic_actions
-from .report import ReportGateError, build_executive_report, build_live_cockpit, write_report_bundle
+from .report import (
+    ReportGateError,
+    build_executive_report,
+    build_live_cockpit,
+    write_live_cockpit,
+    write_report_bundle,
+)
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 from .verify import verify_pair
@@ -155,11 +161,7 @@ def render_cockpit_cmd(args: argparse.Namespace) -> None:
             Path(args.ledger) if args.ledger else None,
         )
         if args.json_out:
-            output = Path(args.json_out)
-            output.write_text(
-                json.dumps(cockpit, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            write_live_cockpit(Path(args.pair), cockpit, Path(args.json_out))
     except ReportGateError as exc:
         emit({"status": "cockpit_gate_failed", "error": str(exc)})
         raise SystemExit(1) from exc

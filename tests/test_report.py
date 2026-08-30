@@ -14,6 +14,7 @@ from theatre_business_bench.report import (
     ReportGateError,
     build_executive_report,
     build_live_cockpit,
+    write_live_cockpit,
     write_report_bundle,
 )
 from theatre_business_bench.simulator import stable_hash
@@ -88,6 +89,25 @@ class ExecutiveReportTests(unittest.TestCase):
             pair_dir, ledger = make_pair_fixture(Path(directory))
             with self.assertRaisesRegex(ReportGateError, "missing result.json"):
                 build_executive_report(pair_dir, ledger)
+
+    def test_live_cockpit_is_written_outside_immutable_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir, ledger = make_pair_fixture(root)
+            cockpit = build_live_cockpit(pair_dir, ledger)
+            output = root / "published" / "live-cockpit.json"
+
+            write_live_cockpit(pair_dir, cockpit, output)
+
+            self.assertEqual(json.loads(output.read_text()), cockpit)
+
+    def test_live_cockpit_cannot_modify_immutable_pair_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir, ledger = make_pair_fixture(root)
+            cockpit = build_live_cockpit(pair_dir, ledger)
+            with self.assertRaisesRegex(ReportGateError, "outside the immutable pair"):
+                write_live_cockpit(pair_dir, cockpit, pair_dir / "cockpit.json")
 
     def test_output_cannot_modify_immutable_pair_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

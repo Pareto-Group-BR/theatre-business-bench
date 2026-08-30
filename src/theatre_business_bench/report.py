@@ -483,6 +483,20 @@ def _atomic_text(path: Path, value: str) -> None:
     temporary.replace(path)
 
 
+def write_live_cockpit(pair_dir: Path, cockpit: dict[str, Any], json_out: Path) -> None:
+    """Atomically publish a verified checkpoint outside immutable evidence.
+
+    A gateway or process interruption must leave either the previous complete
+    cockpit or the new complete cockpit on disk, never a truncated JSON file.
+    """
+
+    pair_root = pair_dir.resolve()
+    output = json_out.resolve()
+    if output == pair_root or pair_root in output.parents:
+        raise ReportGateError("cockpit output must be outside the immutable pair evidence directory")
+    _atomic_text(json_out, json.dumps(cockpit, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+
 def write_report_bundle(
     pair_dir: Path,
     report: dict[str, Any],

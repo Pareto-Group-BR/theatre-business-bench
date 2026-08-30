@@ -56,6 +56,14 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli render-cockpit \
   --json-out live-cockpit.json
 ```
 
+The canonical durable runner is `scripts/run-pilot-batch.sh`. It owns a
+workspace-persistent lock while `pair-batch` is alive, including when its
+parent scheduler is interrupted. `scripts/publish-live-cockpit-if-idle.sh`
+uses the same lock to recover and publish the latest verified checkpoint only
+after the runner has released it. This keeps inference serialized while making
+cockpit publication independently retryable. Neither script communicates a
+partial result; human communication remains a separate, exactly-once boundary.
+
 ## Honest status
 
 The simulator, subscription transport, 28-day paired smoke, and quota-safe paired runner exist. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.

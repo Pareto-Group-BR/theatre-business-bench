@@ -21,7 +21,7 @@ jobs:
       - name: Validate report and publisher entrypoints
         run: |
           python -m compileall -q src tests
-          sh -n scripts/publish-pilot-if-ready.sh
+          for script in scripts/*.sh; do sh -n "$script"; done
       - name: Run full-year deterministic policy smoke
         env:
           PYTHONPATH: src
