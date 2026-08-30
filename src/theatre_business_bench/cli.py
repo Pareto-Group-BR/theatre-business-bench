@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .policies import heuristic_actions
-from .report import ReportGateError, build_executive_report, write_report_bundle
+from .report import ReportGateError, build_executive_report, build_live_cockpit, write_report_bundle
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 from .verify import verify_pair
@@ -145,6 +145,24 @@ def render_report_cmd(args: argparse.Namespace) -> None:
     emit(report)
 
 
+def render_cockpit_cmd(args: argparse.Namespace) -> None:
+    try:
+        cockpit = build_live_cockpit(
+            Path(args.pair),
+            Path(args.ledger) if args.ledger else None,
+        )
+        if args.json_out:
+            output = Path(args.json_out)
+            output.write_text(
+                json.dumps(cockpit, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+    except ReportGateError as exc:
+        emit({"status": "cockpit_gate_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit(cockpit)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -213,6 +231,15 @@ def build_parser() -> argparse.ArgumentParser:
     pair_report.add_argument("--markdown-out", help="write the executive Markdown report")
     pair_report.add_argument("--html-out", help="write the standalone executive HTML report")
     pair_report.set_defaults(func=render_report_cmd)
+
+    pair_cockpit = sub.add_parser(
+        "render-cockpit",
+        help="render a verified live financial and business cockpit",
+    )
+    pair_cockpit.add_argument("--pair", required=True)
+    pair_cockpit.add_argument("--ledger", help="override the global provider-usage ledger path")
+    pair_cockpit.add_argument("--json-out", help="write the live cockpit JSON")
+    pair_cockpit.set_defaults(func=render_cockpit_cmd)
     return parser
 
 

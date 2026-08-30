@@ -19,6 +19,9 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli render-report \
   --json-out "$report_json" \
   --markdown-out "$report_markdown" \
   --html-out "$report_html" >/dev/null
+PYTHONPATH=src python3 -m theatre_business_bench.cli render-cockpit \
+  --pair "$pair_dir" \
+  --json-out live-cockpit.json >/dev/null
 
 openclaw agent \
   --agent main \

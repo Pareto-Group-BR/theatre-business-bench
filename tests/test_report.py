@@ -13,6 +13,7 @@ from pair_fixture import make_pair_fixture
 from theatre_business_bench.report import (
     ReportGateError,
     build_executive_report,
+    build_live_cockpit,
     write_report_bundle,
 )
 from theatre_business_bench.simulator import stable_hash
@@ -26,6 +27,17 @@ def tree_digest(root: Path) -> str:
 
 
 class ExecutiveReportTests(unittest.TestCase):
+    def test_incomplete_verified_pair_renders_honest_live_cockpit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pair_dir, ledger = make_pair_fixture(Path(directory))
+            cockpit = build_live_cockpit(pair_dir, ledger)
+            self.assertEqual(cockpit["claim"], "checkpoint parcial; não permite declarar vencedor")
+            self.assertFalse(cockpit["pair"]["complete"])
+            self.assertIsNone(cockpit["comparison"]["final_winner"])
+            self.assertEqual(cockpit["integrity"]["status"], "passed")
+            self.assertIn("gross_margin_pct", cockpit["arms"]["control"])
+            self.assertIn("stockout_rate_pct", cockpit["arms"]["theatre"])
+
     def test_completed_verified_pair_renders_deterministically_without_mutating_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

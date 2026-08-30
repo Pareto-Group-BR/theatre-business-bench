@@ -38,6 +38,21 @@ PYTHONPATH=src python -m theatre_business_bench.cli render-report --pair runs/pa
 
 `render-report` is the fail-closed handoff from experimental evidence to executive evidence. It accepts only a completed pair that passes `verify-pair`, renders deterministic JSON, Markdown, and standalone HTML, refuses to write inside the immutable pair directory, and never calls a model or advances the simulation. A paused checkpoint is intentionally not reportable as a result.
 
+## Live executive cockpit
+
+The public page loads `live-cockpit.json`, generated only from a checkpoint
+whose replay and provider-usage ledger pass verification. While a pair is not
+complete, the cockpit is explicitly provisional: it exposes cash, revenue,
+gross profit and margin, costs, purchases, inventory, losses, stockouts,
+supplier outcomes, sales, and AI usage without projecting the year or naming a
+final winner.
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli render-cockpit \
+  --pair runs/pairs/20260829T021739Z-pair-s1201 \
+  --json-out live-cockpit.json
+```
+
 ## Honest status
 
 The simulator, subscription transport, 28-day paired smoke, and quota-safe paired runner exist. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.

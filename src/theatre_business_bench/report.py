@@ -7,12 +7,142 @@ from pathlib import Path
 from typing import Any
 
 from .runner import read_json
-from .simulator import stable_hash
+from .simulator import VendingSimulator, stable_hash
 from .verify import verify_pair
 
 
 class ReportGateError(RuntimeError):
     """Raised when evidence is not eligible for executive publication."""
+
+
+def _usage_sum(run_dir: Path, key: str) -> int:
+    path = run_dir / "usage.jsonl"
+    if not path.is_file():
+        return 0
+    total = 0
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            usage = json.loads(line).get("usage", {})
+            value = usage.get(key, 0) if isinstance(usage, dict) else 0
+            total += int(value) if isinstance(value, int) and value >= 0 else 0
+    return total
+
+
+def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, Any]:
+    """Build a read-only executive cockpit from a verified live checkpoint.
+
+    Unlike the final report, this accepts an incomplete pair. It deliberately
+    labels every comparison as provisional and never projects a final winner.
+    """
+
+    pair_dir = pair_dir.resolve()
+    verification = verify_pair(pair_dir, ledger_path)
+    if verification["status"] != "passed":
+        details = "; ".join(verification.get("errors", [])) or "unknown integrity failure"
+        raise ReportGateError(f"pair integrity failed: {details}")
+
+    pair = read_json(pair_dir / "pair.json")
+    total_days = int(pair["days"])
+    arms: dict[str, dict[str, Any]] = {}
+    for arm in ("control", "theatre"):
+        run_dir = _run_path(pair_dir, pair, arm)
+        manifest = read_json(run_dir / "manifest.json")
+        scenario = read_json(run_dir / "scenario.json")
+        state = read_json(run_dir / "state.json")
+        output_tokens = _usage_sum(run_dir, "output")
+        provider_total_tokens = _usage_sum(run_dir, "total")
+        score = VendingSimulator(scenario, int(manifest["seed"]), state=state).score(output_tokens)
+        metrics = state["metrics"]
+        inventory_units = sum(int(value) for value in state["storage"].values()) + sum(
+            int(value) for value in state["machine_inventory"].values()
+        )
+        delivered = int(metrics["orders_delivered"])
+        failed = int(metrics["orders_failed"])
+        resolved_orders = delivered + failed
+        day = int(state["day"])
+        product_days = max(1, day * len(scenario["products"]))
+        arms[arm] = {
+            "day": day,
+            "progress_pct": round(day / total_days * 100, 1),
+            "liquid_cash": score["liquid_cash"],
+            "primary_score_if_stopped_now": score["primary_score"],
+            "virtual_compute_cost": score["virtual_compute_cost"],
+            "revenue": score["revenue"],
+            "gross_profit": score["gross_profit"],
+            "gross_margin_pct": score["gross_margin_pct"],
+            "cost_of_goods_sold": score["cost_of_goods_sold"],
+            "purchases": score["purchases"],
+            "operating_fees": metrics["operating_fees"],
+            "refunds": score["refunds"],
+            "supplier_losses": score["supplier_losses"],
+            "ending_inventory_book_value": score["ending_inventory_book_value"],
+            "inventory_units": inventory_units,
+            "units_sold": score["units_sold"],
+            "stockout_product_days": score["stockout_product_days"],
+            "stockout_rate_pct": round(score["stockout_product_days"] / product_days * 100, 1),
+            "orders_placed": int(metrics["orders_placed"]),
+            "orders_delivered": delivered,
+            "orders_failed": failed,
+            "supplier_success_pct": round(delivered / resolved_orders * 100, 1) if resolved_orders else 0.0,
+            "invalid_actions": score["invalid_actions"],
+            "model_calls": verification["runs"][arm]["model_calls"],
+            "provider_total_tokens": provider_total_tokens,
+            "output_tokens": output_tokens,
+            "terminated": bool(state["terminated"]),
+            "termination_reason": state["termination_reason"],
+            "replay_state_hash": verification["runs"][arm]["replay_state_hash"],
+        }
+
+    common_day = min(arms["control"]["day"], arms["theatre"]["day"])
+    score_delta = round(
+        arms["theatre"]["primary_score_if_stopped_now"]
+        - arms["control"]["primary_score_if_stopped_now"],
+        2,
+    )
+    is_complete = pair.get("status") == "completed" and (pair_dir / "result.json").is_file()
+    cockpit = {
+        "schema_version": 1,
+        "generated_from": "verified_checkpoint",
+        "claim": (
+            "resultado final do piloto"
+            if is_complete
+            else "checkpoint parcial; não permite declarar vencedor"
+        ),
+        "pair": {
+            "pair_id": pair["pair_id"],
+            "seed": pair["seed"],
+            "model": pair["model"],
+            "thinking": pair["thinking"],
+            "status": pair["status"],
+            "updated_at": pair.get("updated_at") or pair.get("completed_at"),
+            "current_day": common_day,
+            "total_days": total_days,
+            "progress_pct": round(common_day / total_days * 100, 1),
+            "complete": is_complete,
+        },
+        "comparison": {
+            "provisional_score_delta_theatre_minus_control": score_delta,
+            "provisional_leader": "theatre" if score_delta > 0 else "control" if score_delta < 0 else "tie",
+            "final_winner": (
+                read_json(pair_dir / "result.json")["winner"] if is_complete else None
+            ),
+        },
+        "arms": arms,
+        "integrity": {
+            "status": "passed",
+            "verification_digest": stable_hash(verification),
+        },
+        "caveats": [
+            "Os números mostram a posição atual se a operação parasse neste checkpoint; não são projeção anual.",
+            "A liderança parcial pode mudar até o dia 365 e não é comunicada como vencedora.",
+            "Estoque aparece pelo valor contábil como evidência operacional, mas não aumenta o score primário.",
+            "O custo computacional virtual é debitado dos tokens de saída de cada braço.",
+        ],
+    }
+    cockpit["integrity"]["cockpit_digest"] = stable_hash(cockpit)
+    return cockpit
 
 
 def _run_path(pair_dir: Path, pair: dict[str, Any], arm: str) -> Path:
