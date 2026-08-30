@@ -45,7 +45,10 @@ whose replay and provider-usage ledger pass verification. While a pair is not
 complete, the cockpit is explicitly provisional: it exposes cash, revenue,
 gross profit and margin, costs, purchases, inventory, losses, stockouts,
 supplier outcomes, sales, and AI usage without projecting the year or naming a
-final winner.
+final winner. The same verified replay also reconstructs an exact daily series
+for liquid cash, cumulative revenue, cumulative gross profit, and provider
+tokens. Token usage is posted on the first simulated day of each three-day
+decision cycle; days without a new model call remain zero.
 
 ```bash
 PYTHONPATH=src python3 -m theatre_business_bench.cli render-cockpit \

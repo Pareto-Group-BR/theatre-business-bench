@@ -37,6 +37,17 @@ class ExecutiveReportTests(unittest.TestCase):
             self.assertEqual(cockpit["integrity"]["status"], "passed")
             self.assertIn("gross_margin_pct", cockpit["arms"]["control"])
             self.assertIn("stockout_rate_pct", cockpit["arms"]["theatre"])
+            self.assertEqual(cockpit["schema_version"], 2)
+            for arm in ("control", "theatre"):
+                timeline = cockpit["arms"][arm]["timeline"]
+                self.assertEqual([point["day"] for point in timeline], [1, 2, 3])
+                self.assertEqual(timeline[-1]["liquid_cash"], cockpit["arms"][arm]["liquid_cash"])
+                self.assertEqual(
+                    sum(point["daily_provider_total_tokens"] for point in timeline),
+                    cockpit["arms"][arm]["provider_total_tokens"],
+                )
+                self.assertEqual(timeline[1]["daily_provider_total_tokens"], 0)
+                self.assertEqual(timeline[2]["daily_provider_total_tokens"], 0)
 
     def test_completed_verified_pair_renders_deterministically_without_mutating_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

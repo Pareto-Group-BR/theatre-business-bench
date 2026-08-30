@@ -30,6 +30,148 @@ def _usage_sum(run_dir: Path, key: str) -> int:
     return total
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    rows.append(value)
+    return rows
+
+
+def _daily_snapshot(
+    simulator: VendingSimulator,
+    *,
+    total_days: int,
+    daily_total_tokens: int,
+    cumulative_total_tokens: int,
+    daily_output_tokens: int,
+    cumulative_output_tokens: int,
+) -> dict[str, Any]:
+    state = simulator.state
+    metrics = state["metrics"]
+    score = simulator.score(cumulative_output_tokens)
+    inventory_units = sum(int(value) for value in state["storage"].values()) + sum(
+        int(value) for value in state["machine_inventory"].values()
+    )
+    product_days = max(1, int(state["day"]) * len(simulator.scenario["products"]))
+    return {
+        "day": int(state["day"]),
+        "progress_pct": round(int(state["day"]) / total_days * 100, 1),
+        "liquid_cash": score["liquid_cash"],
+        "primary_score_if_stopped_now": score["primary_score"],
+        "revenue": score["revenue"],
+        "gross_profit": score["gross_profit"],
+        "gross_margin_pct": score["gross_margin_pct"],
+        "cost_of_goods_sold": score["cost_of_goods_sold"],
+        "purchases": score["purchases"],
+        "operating_fees": metrics["operating_fees"],
+        "supplier_losses": score["supplier_losses"],
+        "ending_inventory_book_value": score["ending_inventory_book_value"],
+        "inventory_units": inventory_units,
+        "units_sold": score["units_sold"],
+        "stockout_rate_pct": round(score["stockout_product_days"] / product_days * 100, 1),
+        "daily_provider_total_tokens": daily_total_tokens,
+        "cumulative_provider_total_tokens": cumulative_total_tokens,
+        "daily_output_tokens": daily_output_tokens,
+        "cumulative_output_tokens": cumulative_output_tokens,
+    }
+
+
+def _build_daily_timeline(run_dir: Path, total_days: int) -> tuple[list[dict[str, Any]], int]:
+    """Replay verified decisions into exact daily business snapshots.
+
+    Model use belongs to a three-day decision cycle. It is posted on the first
+    simulated day advanced by that cycle, while business state is captured on
+    every simulated day. Calls for an unfinished cycle remain unallocated.
+    """
+
+    manifest = read_json(run_dir / "manifest.json")
+    scenario = read_json(run_dir / "scenario.json")
+    persisted_state = read_json(run_dir / "state.json")
+    turns = _read_jsonl(run_dir / "turns.jsonl")
+    decisions = _read_jsonl(run_dir / "model-decisions.jsonl")
+    usages = _read_jsonl(run_dir / "usage.jsonl")
+    business_role = "actor" if manifest["arm"] == "theatre" else "control"
+
+    usage_by_turn: dict[int, dict[str, int]] = {}
+    for decision, usage_row in zip(decisions, usages):
+        turn_index = decision.get("turn_index")
+        usage = usage_row.get("usage", {})
+        if not isinstance(turn_index, int) or not isinstance(usage, dict):
+            continue
+        bucket = usage_by_turn.setdefault(turn_index, {"total": 0, "output": 0})
+        for key in ("total", "output"):
+            value = usage.get(key, 0)
+            if isinstance(value, int) and value >= 0:
+                bucket[key] += value
+
+    simulator = VendingSimulator(scenario, int(manifest["seed"]))
+    timeline: list[dict[str, Any]] = []
+    cumulative_total = 0
+    cumulative_output = 0
+    for expected_index, turn in enumerate(turns):
+        candidates = [
+            item
+            for item in decisions
+            if item.get("turn_index") == expected_index and item.get("role") == business_role
+        ]
+        if len(candidates) != 1:
+            raise ReportGateError(
+                f"{manifest['arm']} timeline cannot resolve business decision {expected_index}"
+            )
+        content = candidates[0].get("content")
+        actions = content.get("actions", []) if isinstance(content, dict) else []
+        if not isinstance(actions, list):
+            actions = []
+        days_to_advance = int(turn["day_after"]) - int(turn["day_before"])
+        if days_to_advance <= 0:
+            raise ReportGateError(f"{manifest['arm']} timeline has a non-advancing turn")
+
+        token_bucket = usage_by_turn.get(expected_index, {"total": 0, "output": 0})
+        cumulative_total += token_bucket["total"]
+        cumulative_output += token_bucket["output"]
+        applied = simulator.apply_turn(actions, advance_days=1)
+        if applied.accepted != turn.get("accepted") or applied.rejected != turn.get("rejected"):
+            raise ReportGateError(f"{manifest['arm']} timeline action replay mismatch")
+        timeline.append(
+            _daily_snapshot(
+                simulator,
+                total_days=total_days,
+                daily_total_tokens=token_bucket["total"],
+                cumulative_total_tokens=cumulative_total,
+                daily_output_tokens=token_bucket["output"],
+                cumulative_output_tokens=cumulative_output,
+            )
+        )
+        for _ in range(days_to_advance - 1):
+            if simulator.state["terminated"]:
+                break
+            simulator._advance_one_day()
+            timeline.append(
+                _daily_snapshot(
+                    simulator,
+                    total_days=total_days,
+                    daily_total_tokens=0,
+                    cumulative_total_tokens=cumulative_total,
+                    daily_output_tokens=0,
+                    cumulative_output_tokens=cumulative_output,
+                )
+            )
+        if stable_hash(simulator.state) != turn.get("state_hash"):
+            raise ReportGateError(f"{manifest['arm']} timeline daily replay hash mismatch")
+
+    if simulator.state != persisted_state:
+        raise ReportGateError(f"{manifest['arm']} timeline differs from persisted state")
+    allocated = sum(point["daily_provider_total_tokens"] for point in timeline)
+    pending_tokens = max(0, _usage_sum(run_dir, "total") - allocated)
+    return timeline, pending_tokens
+
+
 def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, Any]:
     """Build a read-only executive cockpit from a verified live checkpoint.
 
@@ -62,6 +204,7 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
         failed = int(metrics["orders_failed"])
         resolved_orders = delivered + failed
         day = int(state["day"])
+        timeline, pending_tokens = _build_daily_timeline(run_dir, total_days)
         product_days = max(1, day * len(scenario["products"]))
         arms[arm] = {
             "day": day,
@@ -93,6 +236,8 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
             "terminated": bool(state["terminated"]),
             "termination_reason": state["termination_reason"],
             "replay_state_hash": verification["runs"][arm]["replay_state_hash"],
+            "timeline": timeline,
+            "pending_cycle_tokens": pending_tokens,
         }
 
     common_day = min(arms["control"]["day"], arms["theatre"]["day"])
@@ -103,7 +248,7 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
     )
     is_complete = pair.get("status") == "completed" and (pair_dir / "result.json").is_file()
     cockpit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_from": "verified_checkpoint",
         "claim": (
             "resultado final do piloto"
@@ -139,6 +284,7 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
             "A liderança parcial pode mudar até o dia 365 e não é comunicada como vencedora.",
             "Estoque aparece pelo valor contábil como evidência operacional, mas não aumenta o score primário.",
             "O custo computacional virtual é debitado dos tokens de saída de cada braço.",
+            "Tokens são lançados no primeiro dia simulado de cada ciclo decisório de três dias; dias sem nova chamada aparecem com zero.",
         ],
     }
     cockpit["integrity"]["cockpit_digest"] = stable_hash(cockpit)
