@@ -38,6 +38,15 @@ PYTHONPATH=src python -m theatre_business_bench.cli render-report --pair runs/pa
 
 `render-report` is the fail-closed handoff from experimental evidence to executive evidence. It accepts only a completed pair that passes `verify-pair`, renders deterministic JSON, Markdown, and standalone HTML, refuses to write inside the immutable pair directory, and never calls a model or advances the simulation. A paused checkpoint is intentionally not reportable as a result.
 
+When a live pilot reveals a causal hypothesis, do not repair that arm in place.
+The [causal follow-up lane](docs/CAUSAL_FOLLOWUP.md) can clone a verified clean
+checkpoint into an assisted, isolated and explicitly non-scoring run. It binds
+the operator-supplied Consciousness intervention, uses fresh role sessions,
+preserves the source replay and blocks official publication. A v2
+pre-registration remains locked until that exploration is complete and then
+requires five unused seeds plus explicit new design bytes. Fork creation and
+verification are offline and consume no model quota.
+
 ## Live executive cockpit
 
 The public page loads `live-cockpit.json`, generated only from a checkpoint
@@ -66,7 +75,11 @@ partial result; human communication remains a separate, exactly-once boundary.
 
 ## Honest status
 
-The simulator, subscription transport, 28-day paired smoke, and quota-safe paired runner exist. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.
+The simulator, subscription transport, 28-day paired smoke, quota-safe paired
+runner and isolated causal follow-up lane exist. The day-189 causal diagnosis
+does not change the current seed-1201 pilot. A result is official only after
+paired seeds, frozen manifest, full logs, and replay verification are
+published; exploratory forks are never eligible.
 
 Sources:
 

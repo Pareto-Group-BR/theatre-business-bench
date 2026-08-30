@@ -14,7 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from theatre_business_bench.runner import TokenBudget, create_pair, create_run, read_json
+from theatre_business_bench.runner import TokenBudget, _role_message, _session_key, create_pair, create_run, read_json
 from theatre_business_bench.transport import ModelTransportError, parse_json_object
 from theatre_business_bench.cli import pair_batch
 
@@ -29,6 +29,26 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(read_json(run / "scenario.json")["days"], 35)
             self.assertEqual(set(manifest["prompt_hashes"]), {"control", "critic", "planner", "actor"})
             self.assertTrue((run / "flow.json").exists())
+
+    def test_role_message_reads_frozen_run_prompt_and_binds_consciousness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = create_run("theatre", seed=77, days=35, run_root=Path(directory))
+            (run / "prompt-actor.md").write_text("FROZEN ACTOR", encoding="utf-8")
+            message = _role_message(
+                run,
+                "actor",
+                {"day": 12},
+                {"pending": {}},
+                {"planner": None, "actor": None},
+                {"human_will": "use the visible action allowance"},
+            )
+            self.assertTrue(message.startswith("FROZEN ACTOR"))
+            self.assertIn("consciousness_intervention", message)
+
+    def test_exploratory_session_namespace_does_not_reuse_source_session(self) -> None:
+        source = {"run_id": "source-run", "agent_id": "business-bench"}
+        fork = {**source, "session_namespace": "causal-fork-123"}
+        self.assertNotEqual(_session_key(source, "actor"), _session_key(fork, "actor"))
 
     def test_token_budget_reads_provider_totals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

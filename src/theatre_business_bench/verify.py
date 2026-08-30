@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .runner import PROMPT_FILES, read_json
+from .runner import PROMPT_FILES, ROOT, read_json
 from .simulator import VendingSimulator, stable_hash
 
 
@@ -210,6 +210,34 @@ def _verify_run(
     }, errors
 
 
+def verify_run(
+    run_dir: Path,
+    expected_arm: str | None = None,
+    ledger_path: Path | None = None,
+) -> dict[str, Any]:
+    """Replay and audit one durable run without requiring a pair wrapper."""
+    run_dir = run_dir.resolve()
+    errors: list[str] = []
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return {"schema_version": 1, "status": "failed", "errors": ["missing manifest.json"], "run": {}}
+    manifest = read_json(manifest_path)
+    arm = expected_arm or manifest.get("arm")
+    if arm not in ("control", "theatre"):
+        return {"schema_version": 1, "status": "failed", "errors": ["invalid manifest arm"], "run": {}}
+    ledger_path = ledger_path or ROOT / "runs" / "usage-ledger.jsonl"
+    ledger_rows = _read_jsonl(ledger_path, errors)
+    summary, run_errors = _verify_run(run_dir, arm, ledger_rows)
+    errors.extend(run_errors)
+    return {
+        "schema_version": 1,
+        "status": "passed" if not errors else "failed",
+        "ledger_path": str(ledger_path),
+        "run": summary,
+        "errors": errors,
+    }
+
+
 def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, Any]:
     pair_dir = pair_dir.resolve()
     errors: list[str] = []
@@ -243,6 +271,9 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             run_results[arm] = read_json(run_dir / "result.json")
 
     if set(manifests) == {"control", "theatre"}:
+        for arm, manifest in manifests.items():
+            if manifest.get("scoring_eligible") is False or manifest.get("classification") == "assisted_exploratory_non_scoring":
+                errors.append(f"pair: {arm} non-scoring run cannot enter a paired result")
         for field in ("seed", "model", "thinking", "scenario_hash", "decision_period_days"):
             if manifests["control"].get(field) != manifests["theatre"].get(field):
                 errors.append(f"pair: manifest parity mismatch for {field}")

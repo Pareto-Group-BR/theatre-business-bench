@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import itertools
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .policies import heuristic_actions
+from .causal import (
+    CausalGateError,
+    create_causal_fork,
+    create_v2_preregistration,
+    verify_causal_fork,
+)
 from .report import (
     ReportGateError,
     build_executive_report,
@@ -21,6 +29,18 @@ from .verify import verify_pair
 
 def emit(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False))
+
+
+@contextmanager
+def exclusive_runner_lock(path: Path):
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CausalGateError(f"shared runner lock is busy: {path}") from exc
+        yield path
 
 
 def simulate_policy(args: argparse.Namespace) -> None:
@@ -168,6 +188,85 @@ def render_cockpit_cmd(args: argparse.Namespace) -> None:
     emit(cockpit)
 
 
+def create_causal_fork_cmd(args: argparse.Namespace) -> None:
+    try:
+        with exclusive_runner_lock(Path(args.shared_lock)):
+            path = create_causal_fork(
+                Path(args.source_pair),
+                human_will=args.will,
+                hypothesis=args.hypothesis,
+                output_root=Path(args.output_root) if args.output_root else None,
+                ledger_path=Path(args.ledger) if args.ledger else None,
+            )
+            report = verify_causal_fork(path, Path(args.ledger) if args.ledger else None)
+    except CausalGateError as exc:
+        emit({"status": "causal_gate_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit({"status": "created_non_scoring", "fork_dir": str(path), "verification": report})
+
+
+def verify_causal_fork_cmd(args: argparse.Namespace) -> None:
+    report = verify_causal_fork(Path(args.fork), Path(args.ledger) if args.ledger else None)
+    emit(report)
+    if report["status"] != "passed":
+        raise SystemExit(1)
+
+
+def causal_batch_cmd(args: argparse.Namespace) -> None:
+    if not args.confirm_non_scoring:
+        emit({"status": "causal_gate_failed", "error": "--confirm-non-scoring is required"})
+        raise SystemExit(1)
+    fork = Path(args.fork).resolve()
+    if args.max_role_calls is not None and args.max_role_calls < 1:
+        emit({"status": "causal_gate_failed", "error": "--max-role-calls must be positive"})
+        raise SystemExit(1)
+    try:
+        with exclusive_runner_lock(Path(args.shared_lock)):
+            report = verify_causal_fork(fork, Path(args.ledger) if args.ledger else None)
+            if report["status"] != "passed":
+                emit({"status": "causal_gate_failed", "verification": report})
+                raise SystemExit(1)
+            results = []
+            calls = range(args.max_role_calls) if args.max_role_calls is not None else itertools.count()
+            for _ in calls:
+                result = step_run(
+                    Path(report["active_run"]),
+                    daily_token_budget=args.daily_token_budget,
+                    allow_non_scoring=True,
+                )
+                results.append(result)
+                if result["status"] in ("completed", "paused_quota"):
+                    break
+    except CausalGateError as exc:
+        emit({"status": "shared_runner_busy", "error": str(exc)})
+        raise SystemExit(2) from exc
+    emit({
+        "status": "non_scoring_exploration",
+        "scoring_eligible": False,
+        "calls_attempted": len(results),
+        "last": results[-1],
+        "history": results,
+    })
+
+
+def preregister_v2_cmd(args: argparse.Namespace) -> None:
+    try:
+        path = create_v2_preregistration(
+            Path(args.fork),
+            seeds=args.seeds,
+            scenario_path=Path(args.scenario),
+            prompt_dir=Path(args.prompt_dir),
+            protocol_path=Path(args.protocol),
+            output_path=Path(args.output),
+            runs_root=Path(args.runs_root) if args.runs_root else None,
+            ledger_path=Path(args.ledger) if args.ledger else None,
+        )
+    except CausalGateError as exc:
+        emit({"status": "preregistration_gate_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit({"status": "preregistered_not_started", "path": str(path), "registration": read_json(path)})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -257,6 +356,49 @@ def build_parser() -> argparse.ArgumentParser:
     pair_cockpit.add_argument("--ledger", help="override the global provider-usage ledger path")
     pair_cockpit.add_argument("--json-out", help="write the live cockpit JSON")
     pair_cockpit.set_defaults(func=render_cockpit_cmd)
+
+    fork_create = sub.add_parser(
+        "create-causal-fork",
+        help="clone a verified Theatre checkpoint into an isolated non-scoring lane",
+    )
+    fork_create.add_argument("--source-pair", required=True)
+    fork_create.add_argument("--shared-lock", required=True)
+    fork_create.add_argument("--will", required=True, help="operator-supplied Consciousness directive")
+    fork_create.add_argument("--hypothesis", required=True)
+    fork_create.add_argument("--output-root")
+    fork_create.add_argument("--ledger")
+    fork_create.set_defaults(func=create_causal_fork_cmd)
+
+    fork_verify = sub.add_parser("verify-causal-fork", help="audit provenance, replay and isolation")
+    fork_verify.add_argument("--fork", required=True)
+    fork_verify.add_argument("--ledger")
+    fork_verify.set_defaults(func=verify_causal_fork_cmd)
+
+    fork_run = sub.add_parser(
+        "causal-batch",
+        help="advance a verified exploratory fork under the shared runner lock",
+    )
+    fork_run.add_argument("--fork", required=True)
+    fork_run.add_argument("--shared-lock", required=True)
+    fork_run.add_argument("--confirm-non-scoring", action="store_true")
+    fork_run.add_argument("--max-role-calls", type=int)
+    fork_run.add_argument("--daily-token-budget", type=int)
+    fork_run.add_argument("--ledger")
+    fork_run.set_defaults(func=causal_batch_cmd)
+
+    preregister = sub.add_parser(
+        "preregister-v2",
+        help="freeze a five-seed v2 only after a completed exploratory fork",
+    )
+    preregister.add_argument("--fork", required=True)
+    preregister.add_argument("--seeds", nargs=5, type=int, required=True)
+    preregister.add_argument("--scenario", required=True)
+    preregister.add_argument("--prompt-dir", required=True)
+    preregister.add_argument("--protocol", required=True)
+    preregister.add_argument("--output", required=True)
+    preregister.add_argument("--runs-root")
+    preregister.add_argument("--ledger")
+    preregister.set_defaults(func=preregister_v2_cmd)
     return parser
 
 

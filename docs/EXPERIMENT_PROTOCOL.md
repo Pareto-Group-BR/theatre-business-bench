@@ -55,3 +55,22 @@ Final liquid cash after a virtual charge of US$100 per million output tokens.
 - public dashboard displays exact hashes and caveats;
 - completed-pair report renderer passes without mutating evidence and publishes exact verified numbers;
 - seeds and arm order pre-registered.
+
+## Causal learning after a run begins
+
+- A diagnosis observed inside an active pair never authorizes changing that
+  pair's prompt, role memory, scenario, action contract, score, seed or cadence.
+- A checkpoint intervention must live in a separate assisted exploratory fork,
+  be explicitly non-scoring and preserve a byte-exact source snapshot.
+- The operator-supplied Consciousness directive is bound to fork, source pair,
+  source run and checkpoint day. It is context for the exploration only.
+- Exploratory roles use a new session namespace and cannot resume official role
+  sessions.
+- The paired-result verifier rejects non-scoring arms, and no exploratory fork
+  may enter the dashboard, pair aggregate or official publication.
+- Exploration never runs concurrently with the official pair; both use the same
+  external serialization lock.
+- A v2 pre-registration is allowed only after the exploratory fork completes
+  and passes replay. It uses exactly five unused seeds and freezes explicit v2
+  scenario, prompt and protocol hashes before any v2 call.
+- The v1 pilot and exploratory checkpoint remain visible exclusions in v2.

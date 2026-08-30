@@ -144,9 +144,21 @@ def create_run(
     return run_dir
 
 
-def _role_message(role: str, view: dict[str, Any], flow: dict[str, Any], memories: dict[str, Any]) -> str:
-    prompt = (ROOT / "prompts" / f"{role}.md").read_text(encoding="utf-8")
+def _role_message(
+    run_dir: Path,
+    role: str,
+    view: dict[str, Any],
+    flow: dict[str, Any],
+    memories: dict[str, Any],
+    consciousness: dict[str, Any] | None = None,
+) -> str:
+    # A durable run must always execute the prompt bytes frozen at creation.
+    # Reading ROOT/prompts here would let a later merge silently alter an
+    # in-flight pilot even though manifest.json still claims the old hashes.
+    prompt = (run_dir / f"prompt-{role}.md").read_text(encoding="utf-8")
     context: dict[str, Any] = {"business_state": view}
+    if consciousness is not None:
+        context["consciousness_intervention"] = consciousness
     if role == "critic":
         context["prior_plan"] = memories.get("planner")
         context["prior_actor_result"] = memories.get("actor")
@@ -166,7 +178,10 @@ def _critical_event(view: dict[str, Any]) -> bool:
 
 
 def _session_key(manifest: dict[str, Any], role: str) -> str:
-    safe_run = manifest["run_id"].lower().replace("_", "-")
+    # Exploratory forks preserve the source run id so their replayed prefix
+    # remains auditable, but they must never resume the source role sessions.
+    namespace = str(manifest.get("session_namespace") or manifest["run_id"])
+    safe_run = namespace.lower().replace("_", "-")
     return f"agent:{manifest['agent_id']}:bench-{safe_run}-{role}"
 
 
@@ -198,9 +213,13 @@ def _invoke_role(
     memories: dict[str, Any],
     budget: TokenBudget,
     transport: OpenClawCodexTransport,
+    consciousness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     budget.assert_call_allowed()
-    result = transport.invoke(_session_key(manifest, role), _role_message(role, view, flow, memories))
+    result = transport.invoke(
+        _session_key(manifest, role),
+        _role_message(run_dir, role, view, flow, memories, consciousness),
+    )
     if result.provider != "openai" or result.model != manifest["model"].split("/", 1)[-1]:
         raise RuntimeError(f"model drift detected: {result.provider}/{result.model}")
     _record_model_result(run_dir, manifest, role, result)
@@ -222,13 +241,27 @@ def _output_tokens(run_dir: Path) -> int:
         return sum(int(json.loads(line)["usage"].get("output", 0)) for line in handle if line.strip())
 
 
-def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, Any]:
+def step_run(
+    run_dir: Path,
+    daily_token_budget: int | None = None,
+    *,
+    allow_non_scoring: bool = False,
+) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     manifest = read_json(run_dir / "manifest.json")
     scenario = read_json(run_dir / "scenario.json")
     state = read_json(run_dir / "state.json")
     flow = read_json(run_dir / "flow.json")
     memories = read_json(run_dir / "role-memory.json")
+    consciousness_path = run_dir / "consciousness.json"
+    consciousness = read_json(consciousness_path) if consciousness_path.is_file() else None
+    if manifest.get("scoring_eligible") is False:
+        if not allow_non_scoring:
+            raise RuntimeError("non-scoring run requires the verified causal runner")
+        if manifest.get("official") is not False or not manifest.get("session_namespace"):
+            raise RuntimeError("non-scoring run is missing isolation metadata")
+        if consciousness is None or stable_hash(consciousness) != manifest.get("consciousness_intervention_hash"):
+            raise RuntimeError("non-scoring run has an invalid consciousness binding")
     simulator = VendingSimulator(scenario, manifest["seed"], state=state)
     if simulator.state["terminated"]:
         return finalize_run(run_dir)
@@ -254,7 +287,9 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
 
     try:
         if flow["phase"] == "critic":
-            flow["pending"]["critic"] = _invoke_role(run_dir, manifest, "critic", view, flow, memories, budget, transport)
+            flow["pending"]["critic"] = _invoke_role(
+                run_dir, manifest, "critic", view, flow, memories, budget, transport, consciousness
+            )
             memories["critic"] = flow["pending"]["critic"]
             flow["phase"] = "planner"
             flow["updated_at"] = utc_now()
@@ -262,7 +297,9 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             atomic_json(run_dir / "flow.json", flow)
             return {"status": "running", "completed_role": "critic", "next_role": "planner", "run_dir": str(run_dir)}
         if flow["phase"] == "planner":
-            flow["pending"]["planner"] = _invoke_role(run_dir, manifest, "planner", view, flow, memories, budget, transport)
+            flow["pending"]["planner"] = _invoke_role(
+                run_dir, manifest, "planner", view, flow, memories, budget, transport, consciousness
+            )
             memories["planner"] = flow["pending"]["planner"]
             flow["phase"] = "actor"
             flow["updated_at"] = utc_now()
@@ -270,7 +307,9 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             atomic_json(run_dir / "flow.json", flow)
             return {"status": "running", "completed_role": "planner", "next_role": "actor", "run_dir": str(run_dir)}
         role = "actor" if manifest["arm"] == "theatre" else "control"
-        decision = _invoke_role(run_dir, manifest, role, view, flow, memories, budget, transport)
+        decision = _invoke_role(
+            run_dir, manifest, role, view, flow, memories, budget, transport, consciousness
+        )
         memories[role] = decision
         actions = decision.get("actions", [])
         if not isinstance(actions, list):
