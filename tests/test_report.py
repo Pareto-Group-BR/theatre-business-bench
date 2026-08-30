@@ -38,6 +38,9 @@ class ExecutiveReportTests(unittest.TestCase):
             self.assertEqual(cockpit["integrity"]["status"], "passed")
             self.assertIn("gross_margin_pct", cockpit["arms"]["control"])
             self.assertIn("stockout_rate_pct", cockpit["arms"]["theatre"])
+            self.assertIn("strategic_diagnostic", cockpit)
+            self.assertIn("estimated_revenue_gap_volume_effect", cockpit["strategic_diagnostic"])
+            self.assertIn("total_actions", cockpit["arms"]["control"])
             self.assertEqual(cockpit["schema_version"], 2)
             for arm in ("control", "theatre"):
                 timeline = cockpit["arms"][arm]["timeline"]

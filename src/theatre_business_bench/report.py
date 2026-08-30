@@ -205,6 +205,26 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
         resolved_orders = delivered + failed
         day = int(state["day"])
         timeline, pending_tokens = _build_daily_timeline(run_dir, total_days)
+        action_counts: dict[str, int] = {}
+        total_actions = 0
+        decisions_path = run_dir / "model-decisions.jsonl"
+        if decisions_path.is_file():
+            with decisions_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    decision = json.loads(line)
+                    if decision.get("role") not in ("control", "actor"):
+                        continue
+                    actions = decision.get("content", {}).get("actions", [])
+                    if not isinstance(actions, list):
+                        continue
+                    for action in actions:
+                        if not isinstance(action, dict):
+                            continue
+                        action_type = str(action.get("type", "unknown"))
+                        action_counts[action_type] = action_counts.get(action_type, 0) + 1
+                        total_actions += 1
         product_days = max(1, day * len(scenario["products"]))
         arms[arm] = {
             "day": day,
@@ -231,6 +251,8 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
             "supplier_success_pct": round(delivered / resolved_orders * 100, 1) if resolved_orders else 0.0,
             "invalid_actions": score["invalid_actions"],
             "model_calls": verification["runs"][arm]["model_calls"],
+            "total_actions": total_actions,
+            "action_counts": action_counts,
             "provider_total_tokens": provider_total_tokens,
             "output_tokens": output_tokens,
             "terminated": bool(state["terminated"]),
@@ -247,6 +269,32 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
         2,
     )
     is_complete = pair.get("status") == "completed" and (pair_dir / "result.json").is_file()
+    control = arms["control"]
+    theatre = arms["theatre"]
+    control_avg_revenue = control["revenue"] / max(1, control["units_sold"])
+    theatre_avg_revenue = theatre["revenue"] / max(1, theatre["units_sold"])
+    unit_gap = control["units_sold"] - theatre["units_sold"]
+    revenue_gap = control["revenue"] - theatre["revenue"]
+    volume_effect = unit_gap * theatre_avg_revenue
+    price_mix_effect = revenue_gap - volume_effect
+    sustained_control_lead_day = next(
+        (
+            point["day"]
+            for point, theatre_point in zip(control["timeline"], theatre["timeline"], strict=True)
+            if point["gross_profit"] > theatre_point["gross_profit"]
+        ),
+        None,
+    )
+    lookback_days = min(150, max(0, common_day - 1))
+    if lookback_days:
+        start_index = common_day - lookback_days - 1
+        gap_then = (
+            control["timeline"][start_index]["gross_profit"]
+            - theatre["timeline"][start_index]["gross_profit"]
+        )
+    else:
+        gap_then = 0.0
+    gross_profit_gap = control["gross_profit"] - theatre["gross_profit"]
     cockpit = {
         "schema_version": 2,
         "generated_from": "verified_checkpoint",
@@ -272,6 +320,27 @@ def build_live_cockpit(pair_dir: Path, ledger_path: Path | None = None) -> dict[
             "provisional_leader": "theatre" if score_delta > 0 else "control" if score_delta < 0 else "tie",
             "final_winner": (
                 read_json(pair_dir / "result.json")["winner"] if is_complete else None
+            ),
+        },
+        "strategic_diagnostic": {
+            "status": "observed_mechanisms; not a general causal verdict",
+            "sustained_control_gross_profit_lead_from_day": sustained_control_lead_day,
+            "gross_profit_gap_control_minus_theatre": round(gross_profit_gap, 2),
+            "gross_profit_gap_growth_last_lookback": round(gross_profit_gap - gap_then, 2),
+            "lookback_days": lookback_days,
+            "revenue_gap_control_minus_theatre": round(revenue_gap, 2),
+            "units_sold_gap_control_minus_theatre": unit_gap,
+            "estimated_revenue_gap_volume_effect": round(volume_effect, 2),
+            "estimated_revenue_gap_price_mix_effect": round(price_mix_effect, 2),
+            "control_avg_revenue_per_unit": round(control_avg_revenue, 2),
+            "theatre_avg_revenue_per_unit": round(theatre_avg_revenue, 2),
+            "stockout_rate_gap_theatre_minus_control_pp": round(
+                theatre["stockout_rate_pct"] - control["stockout_rate_pct"], 1
+            ),
+            "purchases_gap_control_minus_theatre": round(control["purchases"] - theatre["purchases"], 2),
+            "actions_gap_control_minus_theatre": control["total_actions"] - theatre["total_actions"],
+            "extra_theatre_compute_cost": round(
+                theatre["virtual_compute_cost"] - control["virtual_compute_cost"], 2
             ),
         },
         "arms": arms,

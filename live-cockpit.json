@@ -1,6 +1,14 @@
 {
   "arms": {
     "control": {
+      "action_counts": {
+        "collect_cash": 10,
+        "negotiate": 3,
+        "place_order": 86,
+        "research_supplier": 4,
+        "restock": 144,
+        "set_price": 5
+      },
       "cost_of_goods_sold": 2451.12,
       "day": 189,
       "ending_inventory_book_value": 97.6,
@@ -4000,10 +4008,19 @@
           "units_sold": 2498
         }
       ],
+      "total_actions": 252,
       "units_sold": 2498,
       "virtual_compute_cost": 4.9
     },
     "theatre": {
+      "action_counts": {
+        "collect_cash": 7,
+        "negotiate": 13,
+        "place_order": 73,
+        "research_supplier": 5,
+        "restock": 92,
+        "set_price": 1
+      },
       "cost_of_goods_sold": 1592.72,
       "day": 189,
       "ending_inventory_book_value": 71.02,
@@ -8003,6 +8020,7 @@
           "units_sold": 1879
         }
       ],
+      "total_actions": 191,
       "units_sold": 1879,
       "virtual_compute_cost": 10.2
     }
@@ -8022,7 +8040,7 @@
   },
   "generated_from": "verified_checkpoint",
   "integrity": {
-    "cockpit_digest": "5aefdd32d6b594276e6bc0fa8040e4e752c13f3b0ad63fc16ebf663efe464802",
+    "cockpit_digest": "8f5634a142b2efc3831630a65fecdc47ad5f75d3f35a5ce71944f700ab92bfab",
     "status": "passed",
     "verification_digest": "a5cd3af9410809a1a772bfec7b678f14cbb999f265270ef8a8cd2277e6ca4059"
   },
@@ -8038,5 +8056,22 @@
     "total_days": 365,
     "updated_at": "2026-08-30T06:05:11+00:00"
   },
-  "schema_version": 2
+  "schema_version": 2,
+  "strategic_diagnostic": {
+    "actions_gap_control_minus_theatre": 61,
+    "control_avg_revenue_per_unit": 2.35,
+    "estimated_revenue_gap_price_mix_effect": 716.85,
+    "estimated_revenue_gap_volume_effect": 1275.33,
+    "extra_theatre_compute_cost": 5.3,
+    "gross_profit_gap_control_minus_theatre": 1133.78,
+    "gross_profit_gap_growth_last_lookback": 926.41,
+    "lookback_days": 150,
+    "purchases_gap_control_minus_theatre": 884.98,
+    "revenue_gap_control_minus_theatre": 1992.18,
+    "status": "observed_mechanisms; not a general causal verdict",
+    "stockout_rate_gap_theatre_minus_control_pp": 11.3,
+    "sustained_control_gross_profit_lead_from_day": 7,
+    "theatre_avg_revenue_per_unit": 2.06,
+    "units_sold_gap_control_minus_theatre": 619
+  }
 }
