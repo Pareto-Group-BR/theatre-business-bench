@@ -41,8 +41,9 @@ to submit actions.
 
 Pairs are created offline with frozen copies and a run-root provider ledger.
 Activation accepts only an untouched pair and the exact clean commit currently
-published at `origin/main`; its hashed receipt is required by both manifests at
-every step. `scripts/run-v2-batch.sh` adds one inherited global lock across all
+published at `origin/main`; it atomically marks the pair, both manifests and
+the hashed receipt as official. The verifier requires that official identity at
+every activated step and before reporting. `scripts/run-v2-batch.sh` adds one inherited global lock across all
 official seeds, while `step_pair` balances and serializes the two arms within a
 pair.
 

@@ -104,7 +104,9 @@ THEATRE_PAIR_DIR="$run_root/pairs/<pair-id>" ./scripts/run-v2-batch.sh
 
 Creation is offline-only: `pair-batch` cannot make a model call until activation
 binds an untouched pair to the exact clean commit currently published at
-`origin/main`. The shared v2 shell lock serializes provider calls across all
+`origin/main`. Activation also marks the pair, both run manifests, and its
+receipt as official in one audited transition; `verify-pair` refuses any drift
+before inference or publication. The shared v2 shell lock serializes provider calls across all
 official seeds. Every model response is contract-checked before simulator
 execution; failed structure pauses loud as evidence. `verify-pair` independently
 reconstructs role order, handoffs, decision audits, actions, replay hashes,

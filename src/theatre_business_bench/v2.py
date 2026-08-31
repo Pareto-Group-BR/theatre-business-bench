@@ -227,6 +227,7 @@ def activate_v2_pair(pair_dir: Path, source_commit: str) -> dict[str, Any]:
     receipt = {
         "schema_version": 1,
         "protocol": "v2",
+        "official": True,
         "pair_id": pair["pair_id"],
         "source_commit": source_commit,
         "preregistration_sha256": prereg_hash,
@@ -240,12 +241,14 @@ def activate_v2_pair(pair_dir: Path, source_commit: str) -> dict[str, Any]:
         manifest = read_json(run_dir / "manifest.json")
         manifest.update({
             "inference_enabled": True,
+            "official": True,
             "source_commit": source_commit,
             "activation_receipt_sha256": receipt_hash,
         })
         atomic_json(run_dir / "manifest.json", manifest)
     pair.update({
         "inference_enabled": True,
+        "official": True,
         "source_commit": source_commit,
         "activation_receipt_sha256": receipt_hash,
     })

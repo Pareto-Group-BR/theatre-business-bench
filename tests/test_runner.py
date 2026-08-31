@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from theatre_business_bench.runner import (
     TokenBudget,
     _role_message,
+    atomic_json,
     create_pair,
     create_run,
     read_json,
@@ -185,6 +186,11 @@ class RunnerTests(unittest.TestCase):
             pair_dir = create_pair(seed=2201, run_root=Path(directory), protocol="v2")
             with patch("theatre_business_bench.v2._published_source_identity"):
                 activate_v2_pair(pair_dir, "a" * 40)
+            activated = read_json(pair_dir / "pair.json")
+            self.assertTrue(activated["official"])
+            self.assertTrue(read_json(pair_dir / "activation.json")["official"])
+            self.assertTrue(read_json(Path(activated["control_run"]) / "manifest.json")["official"])
+            self.assertTrue(read_json(Path(activated["theatre_run"]) / "manifest.json")["official"])
             with patch.object(OpenClawCodexTransport, "invoke", new=fake_invoke):
                 results = [step_pair(pair_dir) for _ in range(5)]
             self.assertTrue(all(result["pair_status"] == "running" for result in results))
@@ -192,6 +198,12 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(report["status"], "passed", report["errors"])
             self.assertEqual(report["runs"]["control"]["day"], 3)
             self.assertEqual(report["runs"]["theatre"]["day"], 3)
+
+            activated["official"] = False
+            atomic_json(pair_dir / "pair.json", activated)
+            tampered = verify_pair(pair_dir)
+            self.assertEqual(tampered["status"], "failed")
+            self.assertIn("pair: activated v2 pair is not marked official", tampered["errors"])
 
     def test_v2_frozen_preregistration_tamper_fails_pair_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

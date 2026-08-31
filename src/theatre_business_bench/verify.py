@@ -395,6 +395,7 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
                 "source_commit",
                 "activation_receipt_sha256",
                 "inference_enabled",
+                "official",
             )
         for field in parity_fields:
             if manifests["control"].get(field) != manifests["theatre"].get(field):
@@ -450,6 +451,8 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             enabled = pair.get("inference_enabled") is True
             activation_path = pair_dir / "activation.json"
             if enabled:
+                if pair.get("official") is not True:
+                    errors.append("pair: activated v2 pair is not marked official")
                 if not activation_path.is_file():
                     errors.append("pair: inference enabled without activation receipt")
                 else:
@@ -465,6 +468,11 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
                         errors.append("pair: activation preregistration hash mismatch")
                     if activation.get("artifact_hashes") != pair.get("artifact_hashes"):
                         errors.append("pair: activation artifact hashes mismatch")
+                    if activation.get("official") is not True:
+                        errors.append("pair: activation receipt is not marked official")
+                for arm in ("control", "theatre"):
+                    if manifests[arm].get("official") is not True:
+                        errors.append(f"pair: activated {arm} manifest is not marked official")
             elif activation_path.exists() or pair.get("activation_receipt_sha256") is not None:
                 errors.append("pair: offline pair contains an activation receipt")
     if set(scenarios) == {"control", "theatre"}:
