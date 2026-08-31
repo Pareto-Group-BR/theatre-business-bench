@@ -66,7 +66,18 @@ partial result; human communication remains a separate, exactly-once boundary.
 
 ## Honest status
 
-The simulator, subscription transport, 28-day paired smoke, and quota-safe paired runner exist. A result is official only after paired seeds, frozen manifest, full logs, and replay verification are published.
+The simulator, subscription transport, 28-day paired smoke, and the first
+365-day paired pilot exist. Seed 1201 completed with replay and provider-usage
+verification green; the single agent scored US$7,016.88 and Theatre scored
+US$4,437.91 after the virtual compute charge. This is an honest pilot result,
+not the official five-seed benchmark verdict.
+
+- [Standalone pilot result](pilot-result.html)
+- [Executive Markdown evidence](docs/PILOT_RESULT_1201.md)
+- [Canonical machine-readable report](pilot-result.json)
+
+An official result still requires the frozen manifest, five pre-registered
+paired seeds, full logs, replay verification, and the planned paired analysis.
 
 Sources:
 

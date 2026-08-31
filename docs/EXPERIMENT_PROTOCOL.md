@@ -1,6 +1,6 @@
 # Experiment protocol v1
 
-Status: implementation validation. Official manifest is not frozen yet.
+Status: first 365-day pilot completed and verified; official manifest is not frozen yet.
 
 ## Question
 
@@ -50,7 +50,7 @@ Final liquid cash after a virtual charge of US$100 per million output tokens.
 
 - economics and replay tests green;
 - one paired 28-day smoke complete;
-- one paired 365-day pilot complete;
+- one paired 365-day pilot complete (seed 1201; control won this pilot by US$2,578.97);
 - prompts and scenario reviewed and frozen;
 - public dashboard displays exact hashes and caveats;
 - completed-pair report renderer passes without mutating evidence and publishes exact verified numbers;
