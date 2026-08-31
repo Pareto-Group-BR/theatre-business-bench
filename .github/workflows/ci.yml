@@ -23,6 +23,7 @@ jobs:
           python -m compileall -q src tests
           for script in scripts/*.sh; do sh -n "$script"; done
           PYTHONPATH=src python -m theatre_business_bench.cli audit-v2-preregistration
+          PYTHONPATH=src python -m theatre_business_bench.cli audit-v3-preregistration
       - name: Run full-year deterministic policy smoke
         env:
           PYTHONPATH: src

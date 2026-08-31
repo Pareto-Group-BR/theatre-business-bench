@@ -55,9 +55,9 @@ deterministic `decision_audit`; the verifier reconstructs cadence, handoffs,
 actions, state, activation, frozen artifact hashes, and provider-ledger parity
 without invoking a model.
 
-### Prospective v3 contract boundary
+### V3 lifecycle and contract boundary
 
-V3 remains offline and inference-disabled at this stage. Its frozen contract
+V3 pair creation remains offline and inference-disabled. Its frozen contract
 separates plan items into `now` and `conditional_future`. Immediate critical
 items must execute in the same handoff; future items require an observable
 precondition, are acknowledged by exact id, and are rejected if submitted
@@ -67,10 +67,22 @@ Theatre Roteirista→Personagem handoff.
 V3 also freezes one structured repair per role invocation. The repair keeps
 role, turn, and state identity, receives deterministic validation errors, and
 must return a complete valid replacement. Both attempts are chargeable
-evidence and no simulator transition may occur between them. The current
-package implements the pre-registration audit and pure gates only; pair
-activation and runner/replay support stay disabled until a reviewed executor
-persists both attempts and proves those invariants end to end.
+evidence and no simulator transition may occur between them. The executor
+freezes the exact preregistration, protocol, corpus, and six prompts into each
+run; rejects any seed or runtime setting outside the frozen plan; and enables
+inference only after an untouched pair is bound to the exact clean source
+commit already published at `origin/main`.
+
+Before each v3 provider attempt, `call-journal.jsonl` durably records its exact
+role, turn, state, attempt kind, and serial. A completed attempt must have one
+provider-usage row and one immutable decision or failure row. Structural
+failure creates a `pending_invocation` bound to the original response and may
+consume exactly one repair call. A quota pause between calls resumes only that
+repair; an accepted response is recorded in `role-invocations.jsonl` before the
+flow advances. The verifier reconstructs these bindings, rejects dangling or
+duplicate attempts, and deterministically replays only accepted responses.
+Parse failures, transport or provider-quota failures, model drift, and a second
+structural failure become loud terminal evidence without a simulator turn.
 
 ## Subscription transport
 
@@ -96,6 +108,8 @@ Every run owns:
 - `usage.jsonl`: token ledger;
 - `model-decisions.jsonl`: immutable model outputs;
 - `model-failures.jsonl`: raw invalid model outputs that consumed provider quota but could not become decisions;
+- `call-journal.jsonl`: write-ahead started/completed/transport-failed provider-attempt identity (v3);
+- `role-invocations.jsonl`: accepted-first-pass, accepted-repair, or terminal-repair binding (v3);
 - `turns.jsonl`: accepted/rejected actions and state hashes;
 - `result.json`: final score and evidence hash.
 
@@ -115,7 +129,9 @@ economic state transition. Repeated attempts at one phase are valid evidence
 only when the verifier can bind all of them to that forensic receipt.
 
 The canonical pilot runner holds a persistent workspace lock for the lifetime
-of `pair-batch`. The file descriptor is inherited by the model-execution child,
+of `pair-batch`. Official v2 and v3 runners share the same global lock, and the
+CLI refuses an activated official pair without its inherited descriptor. The
+file descriptor is inherited by the model-execution child,
 so a scheduler or gateway interruption cannot make a still-running batch look
 idle. Checkpoint publication is a separate idempotent process that acquires the
 same lock, verifies the replay, renders the cockpit atomically, and pushes only
