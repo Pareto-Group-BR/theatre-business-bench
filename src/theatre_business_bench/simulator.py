@@ -187,7 +187,8 @@ class VendingSimulator:
             "recent_events": copy.deepcopy(state["recent_events"][-20:]),
             "last_turn": copy.deepcopy(state["last_turn"]),
             "metrics": copy.deepcopy(state["metrics"]),
-            "allowed_actions": self.action_contract()
+            "allowed_actions": self.action_contract(),
+            "max_actions_per_turn": int(self.scenario["max_actions_per_turn"]),
         }
 
     def action_contract(self) -> list[dict[str, Any]]:

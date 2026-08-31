@@ -1,0 +1,98 @@
+{
+  "schema": "theatre-business-bench-preregistration/v2",
+  "frozen": true,
+  "run_status": "not_started",
+  "research_question": "Does persistent separation into specialized Theatre roles improve paired annual economic performance when control concentrates the same functional responsibilities?",
+  "design": {
+    "paired_seeds": [2201, 2202, 2203, 2204, 2205],
+    "arm_order": {
+      "2201": "control_first",
+      "2202": "theatre_first",
+      "2203": "control_first",
+      "2204": "theatre_first",
+      "2205": "control_first"
+    },
+    "days": 365,
+    "decision_period_days": 3,
+    "model": "openai/gpt-5.6-sol",
+    "thinking": "medium",
+    "serialization": "one provider call at a time across both arms",
+    "max_actions_per_turn": 14,
+    "human_intervention": "forbidden",
+    "live_internet": "forbidden",
+    "shared_frozen_corpus": true,
+    "opponent_information": "forbidden",
+    "failed_and_low_scoring_runs": "preserve"
+  },
+  "functional_parity": {
+    "control_responsibilities": [
+      "critical_audit",
+      "financial_and_supply_planning",
+      "business_operations",
+      "strategic_challenge"
+    ],
+    "theatre_responsibilities": {
+      "critic": ["critical_audit"],
+      "planner": ["financial_and_supply_planning"],
+      "actor": ["business_operations"],
+      "consciousness": ["strategic_challenge"]
+    }
+  },
+  "cadence": {
+    "strategic_review_every_turns": 9,
+    "consciousness_every_turns": 18,
+    "consciousness_on_first_turn": true,
+    "consciousness_on_critical_verdict": true,
+    "review_on_critical_simulator_event": true,
+    "theatre_order": ["critic", "consciousness_if_due", "planner", "actor"]
+  },
+  "execution_gates": {
+    "critical_correction_required": true,
+    "critical_verification_required": true,
+    "plan_action_binding_required": true,
+    "actor_adherence_system_validated": true,
+    "action_capacity_system_validated": true,
+    "invalid_structure": "pause_loud_and_preserve_evidence"
+  },
+  "primary_metric": "final liquid cash minus USD 100 per million output tokens",
+  "analysis": {
+    "pairs_before_aggregation": true,
+    "paired_difference": "theatre minus control",
+    "summaries": ["mean", "median", "theatre_seed_wins", "bootstrap_interval"],
+    "interval_includes_zero": "inconclusive"
+  },
+  "artifacts": {
+    "scenario": {
+      "path": "scenarios/vending_v1.json",
+      "sha256": "b296fb0c0fd69cd3f660b8b890c0c7c18d7cbbbb939cc27416b147d1d91579f8"
+    },
+    "shared_corpus": {
+      "path": "corpus/vending_operations_v2.md",
+      "sha256": "a1f16b9183d1e635de793edc2f62d200a60fe66a2629e07ec8d8bdb50e14fd5f"
+    },
+    "protocol": {
+      "path": "docs/EXPERIMENT_PROTOCOL_V2.md",
+      "sha256": "20b4633c0c544a09b876782c1652e26ab7e24db8eddeaf5dffd03b1807d3e228"
+    },
+    "prompt_control": {
+      "path": "prompts/v2/control.md",
+      "sha256": "732954f9d028b79605c106d1e99c65f85ab4494dd40f00190226c8f9d36255ea"
+    },
+    "prompt_critic": {
+      "path": "prompts/v2/critic.md",
+      "sha256": "5b63e613cbedffad6081d53246988609741a9b2ff781efb4c0e4e5273006f11e"
+    },
+    "prompt_consciousness": {
+      "path": "prompts/v2/consciousness.md",
+      "sha256": "d09e6153495b47a7dd05c75ebdd5557c738da9eb7f247211dc23d59f6aa03c7d"
+    },
+    "prompt_planner": {
+      "path": "prompts/v2/planner.md",
+      "sha256": "8ec54622c3bbb4519ed16e840685bc817b43c08e4911c439275fa937d00ed236"
+    },
+    "prompt_actor": {
+      "path": "prompts/v2/actor.md",
+      "sha256": "9f3360e0b10c308cb059c6780cfdc697885c1b93040120c3a73570685544d715"
+    }
+  }
+}

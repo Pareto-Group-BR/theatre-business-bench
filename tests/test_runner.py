@@ -14,7 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from theatre_business_bench.runner import TokenBudget, create_pair, create_run, read_json
+from theatre_business_bench.runner import TokenBudget, _role_message, create_pair, create_run, read_json
 from theatre_business_bench.transport import ModelTransportError, parse_json_object
 from theatre_business_bench.cli import pair_batch
 
@@ -66,6 +66,23 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(read_json(control / "manifest.json")["seed"], 91)
             self.assertEqual(read_json(theatre / "manifest.json")["seed"], 91)
             self.assertEqual(pair["next_arm"], "control")
+
+    def test_role_message_uses_frozen_run_prompt_not_mutable_repository_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = create_run("control", seed=92, days=3, run_root=Path(directory))
+            frozen = run / "prompt-control.md"
+            frozen.write_text("FROZEN PROMPT\n", encoding="utf-8")
+            message = _role_message(run, "control", {"day": 1}, {"pending": {}}, {})
+            self.assertTrue(message.startswith("FROZEN PROMPT\n"))
+
+    def test_public_view_exposes_real_action_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = create_run("control", seed=93, days=3, run_root=Path(directory))
+            scenario = read_json(run / "scenario.json")
+            from theatre_business_bench.simulator import VendingSimulator
+
+            view = VendingSimulator(scenario, 93).public_view()
+            self.assertEqual(view["max_actions_per_turn"], scenario["max_actions_per_turn"])
 
     def test_pair_batch_refuses_to_resume_failed_integrity(self) -> None:
         report = {"status": "failed", "errors": ["replay hash mismatch"]}

@@ -1,8 +1,21 @@
 # Theatre Business Bench — handoff autocontido para outra IA
 
-> Atualizado em 2026-08-30, no checkpoint verificado do dia 189/365 da seed 1201.
+> Snapshot causal produzido em 2026-08-30 no dia 189/365. O piloto terminou em
+> 2026-08-31 e o resultado final verificável está em `PILOT_RESULT_1201.md`.
 >
 > Este documento serve para uma IA compreender, auditar, continuar a análise ou desenhar uma nova versão do experimento sem contaminar a evidência já produzida.
+
+## Estado atual (substitui somente o status, não o snapshot histórico abaixo)
+
+- O piloto v1 seed 1201 terminou em 365/365 nos dois braços e passou em
+  `verify-pair`; controle US$ 7.016,88, Theatre US$ 4.437,91, diferença
+  Theatre − controle de -US$ 2.578,97.
+- O resultado é piloto, não veredito oficial de cinco seeds.
+- A v2 autônoma está pré-registrada em `preregistration/v2.json`, com protocolo,
+  cinco prompts, corpus compartilhado e auditoria de paridade. Nenhuma
+  inferência v2 foi iniciada.
+- As seções 10 e 11 permanecem deliberadamente como diagnóstico do checkpoint
+  D189 que motivou o desenho v2; não devem ser lidas como estado corrente.
 
 ## 1. Instrução para a IA que receber este documento
 
@@ -595,4 +608,3 @@ Uma continuação é considerada correta somente quando:
 - registra tokens e falhas;
 - publica estado parcial como parcial;
 - produz uma experiência ou evidência que outra pessoa consiga reproduzir.
-

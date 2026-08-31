@@ -144,8 +144,17 @@ def create_run(
     return run_dir
 
 
-def _role_message(role: str, view: dict[str, Any], flow: dict[str, Any], memories: dict[str, Any]) -> str:
-    prompt = (ROOT / "prompts" / f"{role}.md").read_text(encoding="utf-8")
+def _role_message(
+    run_dir: Path,
+    role: str,
+    view: dict[str, Any],
+    flow: dict[str, Any],
+    memories: dict[str, Any],
+) -> str:
+    # A durable run executes the bytes frozen at creation. Reading ROOT/prompts
+    # here would let a later merge silently change an in-flight treatment while
+    # manifest.json continued to attest the older hash.
+    prompt = (run_dir / f"prompt-{role}.md").read_text(encoding="utf-8")
     context: dict[str, Any] = {"business_state": view}
     if role == "critic":
         context["prior_plan"] = memories.get("planner")
@@ -200,7 +209,7 @@ def _invoke_role(
     transport: OpenClawCodexTransport,
 ) -> dict[str, Any]:
     budget.assert_call_allowed()
-    result = transport.invoke(_session_key(manifest, role), _role_message(role, view, flow, memories))
+    result = transport.invoke(_session_key(manifest, role), _role_message(run_dir, role, view, flow, memories))
     if result.provider != "openai" or result.model != manifest["model"].split("/", 1)[-1]:
         raise RuntimeError(f"model drift detected: {result.provider}/{result.model}")
     _record_model_result(run_dir, manifest, role, result)

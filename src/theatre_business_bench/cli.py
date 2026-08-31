@@ -16,6 +16,7 @@ from .report import (
 )
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
+from .v2 import audit_preregistration
 from .verify import verify_pair
 
 
@@ -135,6 +136,17 @@ def verify_pair_cmd(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def audit_v2_cmd(args: argparse.Namespace) -> None:
+    result = (
+        audit_preregistration(Path(args.preregistration))
+        if args.preregistration
+        else audit_preregistration()
+    )
+    emit(result)
+    if result["status"] != "passed":
+        raise SystemExit(1)
+
+
 def render_report_cmd(args: argparse.Namespace) -> None:
     try:
         report = build_executive_report(
@@ -237,6 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
     pair_verify.add_argument("--pair", required=True)
     pair_verify.add_argument("--ledger", help="override the global provider-usage ledger path")
     pair_verify.set_defaults(func=verify_pair_cmd)
+
+    v2_audit = sub.add_parser(
+        "audit-v2-preregistration",
+        help="verify frozen v2 parity, exclusions, seeds, and artifact hashes without inference",
+    )
+    v2_audit.add_argument("--preregistration", help="override preregistration/v2.json for audit testing")
+    v2_audit.set_defaults(func=audit_v2_cmd)
 
     pair_report = sub.add_parser(
         "render-report",

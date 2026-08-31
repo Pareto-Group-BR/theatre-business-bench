@@ -79,6 +79,25 @@ not the official five-seed benchmark verdict.
 An official result still requires the frozen manifest, five pre-registered
 paired seeds, full logs, replay verification, and the planned paired analysis.
 
+## Theatre v2 pre-registration
+
+The autonomous v2 treatment is specified and machine-auditable, but **no v2
+inference has started**. It gives the single-agent control and Theatre the same
+four functional responsibilities, the same frozen domain corpus, and the same
+visible 14-action contract; only cognitive organization differs. Theatre adds
+an autonomous Consciência role, while control carries the same strategic-
+challenge checklist inside its combined response.
+
+```bash
+PYTHONPATH=src python -m theatre_business_bench.cli audit-v2-preregistration
+```
+
+The command recomputes every frozen artifact hash and rejects asymmetry,
+internet/human intervention, seed drift, or an incomplete pre-registration
+before any future runner may start. See
+[`docs/EXPERIMENT_PROTOCOL_V2.md`](docs/EXPERIMENT_PROTOCOL_V2.md) and
+[`preregistration/v2.json`](preregistration/v2.json).
+
 Sources:
 
 - https://andonlabs.com/evals/vending-bench-2
