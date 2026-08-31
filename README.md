@@ -104,7 +104,7 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli render-v2-campaign \
   --html-out /tmp/v2-terminal-campaign.html
 ```
 
-## Prospective v3 pre-registration
+## V3 pre-registration and executor
 
 V3 is a new, inference-free pre-registration motivated by the terminal v2
 evidence. It never resumes or edits seeds 2201–2205. Five new seeds 2301–2305
@@ -120,20 +120,46 @@ mechanisms:
   repair after JSON-parseable contract failure. Parse/transport/quota failures
   and a second structural failure remain terminal.
 
-The pre-registration and deterministic contract gates are implemented and
-auditable without model execution:
+The pre-registration, lifecycle executor, deterministic replay, and contract
+gates are implemented and auditable without model execution:
 
 ```bash
 PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v3-preregistration
-python3 -m unittest tests.test_v3 -v
+python3 -m unittest tests.test_v3 tests.test_v3_executor -v
 ```
 
-State: `PREREGISTERED_TECHNICALLY / NO_INFERENCE`. V3 pair creation,
-activation, repair recording, replay, and the official runner are intentionally
-not enabled by this pre-registration package; enabling inference requires a
-separate reviewed executor change that consumes these exact frozen bytes.
+State: `EXECUTOR_READY_FOR_REVIEW / NO_INFERENCE`. Pair creation freezes the
+exact v3 bytes and remains offline. Activation is a separate audited transition
+that accepts only an untouched pair from seeds 2301–2305 and the exact clean
+commit published at `origin/main`. No official seed has been created or
+activated by this implementation change.
 See [`docs/EXPERIMENT_PROTOCOL_V3.md`](docs/EXPERIMENT_PROTOCOL_V3.md) and
 [`preregistration/v3.json`](preregistration/v3.json).
+
+After this executor is reviewed, merged, published on `main`, and a complete
+official seed can be run as one indivisible unit, its lifecycle is:
+
+```bash
+run_root=/absolute/durable/path/theatre-business-bench-v3
+PYTHONPATH=src python3 -m theatre_business_bench.cli create-pair \
+  --protocol v3 --seed 2301 --run-root "$run_root"
+source_commit=$(git rev-parse HEAD)
+PYTHONPATH=src python3 -m theatre_business_bench.cli activate-v3-pair \
+  --pair "$run_root/pairs/<pair-id>" --source-commit "$source_commit"
+THEATRE_PAIR_DIR="$run_root/pairs/<pair-id>" ./scripts/run-v3-batch.sh
+PYTHONPATH=src python3 -m theatre_business_bench.cli verify-pair \
+  --pair "$run_root/pairs/<pair-id>"
+```
+
+The v2 and v3 wrappers share one workspace-global official-inference lock. The
+CLI independently requires the inherited lock descriptor for every activated
+official pair, preventing direct `pair-batch` use from bypassing serialization.
+Each provider attempt has a write-ahead journal; every completed attempt is
+bound to exactly one provider-usage row and one decision or failure row. V3
+preserves the original response and permits one paid symmetric structural
+repair with the same role, turn, state, and original-response identity. A
+second failure, parse failure, transport failure, model drift, incomplete call
+journal, or replay divergence stops loud before any simulator transition.
 
 The frozen design gave the single-agent control and Theatre the same four
 functional responsibilities, frozen evidence, and visible 14-action contract;
@@ -141,9 +167,9 @@ only cognitive organization differed. Theatre routed Crítico → optional
 Consciência → Roteirista → Personagem on scheduled reviews, while control
 carried the same responsibilities and schedule flags in one response.
 
-The creation/activation flow below documents the executor contract. It must be
-used only for a separately pre-registered future protocol with new seeds, never
-for the terminal v2 seeds.
+The historical v2 lifecycle below is retained only as executor documentation.
+Seeds 2201–2205 are terminal immutable evidence and these commands must never be
+used to resume, recreate, activate, delete, or edit them.
 
 ```bash
 PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v2-preregistration
@@ -162,8 +188,8 @@ Creation is offline-only: `pair-batch` cannot make a model call until activation
 binds an untouched pair to the exact clean commit currently published at
 `origin/main`. Activation also marks the pair, both run manifests, and its
 receipt as official in one audited transition; `verify-pair` refuses any drift
-before inference or publication. The shared v2 shell lock serializes provider calls across all
-official seeds. Every model response is contract-checked before simulator
+before inference or publication. The shared official shell lock serializes
+provider calls across all v2/v3 seeds. Every model response is contract-checked before simulator
 execution; failed structure pauses loud as evidence. `verify-pair` independently
 reconstructs role order, handoffs, decision audits, actions, replay hashes,
 provider usage, and the run-root ledger before any resume. See

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -72,7 +73,22 @@ class OpenClawCodexTransport:
             "--message", message,
         ]
         started = time.monotonic()
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=self.timeout_seconds + 30)
+        pass_fds: tuple[int, ...] = ()
+        lock_fd = os.environ.get("THEATRE_OFFICIAL_LOCK_FD")
+        if lock_fd is not None:
+            try:
+                descriptor = int(lock_fd)
+                os.fstat(descriptor)
+            except (ValueError, OSError) as exc:
+                raise ModelTransportError("official lock descriptor is invalid") from exc
+            pass_fds = (descriptor,)
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=self.timeout_seconds + 30,
+            pass_fds=pass_fds,
+        )
         duration_ms = int((time.monotonic() - started) * 1000)
         if completed.returncode != 0:
             combined = (completed.stderr + "\n" + completed.stdout).strip()

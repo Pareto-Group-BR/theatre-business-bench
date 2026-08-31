@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,13 +14,22 @@ from typing import Any
 from .simulator import VendingSimulator, stable_hash
 from .transport import ModelResult, ModelTransportError, OpenClawCodexTransport
 from .v2 import (
-    PREREGISTRATION,
+    PREREGISTRATION as V2_PREREGISTRATION,
     V2ContractError,
-    audit_preregistration,
-    extract_actions,
-    seed_plan,
-    validate_role_output,
-    validate_theatre_handoff,
+    audit_preregistration as audit_v2_preregistration,
+    extract_actions as extract_v2_actions,
+    seed_plan as v2_seed_plan,
+    validate_role_output as validate_v2_role_output,
+    validate_theatre_handoff as validate_v2_theatre_handoff,
+)
+from .v3 import (
+    PREREGISTRATION as V3_PREREGISTRATION,
+    V3ContractError,
+    audit_preregistration as audit_v3_preregistration,
+    seed_plan as v3_seed_plan,
+    validate_repair_envelope,
+    validate_role_output as validate_v3_role_output,
+    validate_theatre_handoff as validate_v3_theatre_handoff,
 )
 
 
@@ -37,6 +47,12 @@ V2_PROMPT_FILES = {
 }
 V2_CORPUS = ROOT / "corpus" / "vending_operations_v2.md"
 V2_PROTOCOL = ROOT / "docs" / "EXPERIMENT_PROTOCOL_V2.md"
+V3_PROMPT_FILES = {
+    role: ROOT / "prompts" / "v3" / f"{role}.md"
+    for role in ("control", "critic", "consciousness", "planner", "actor", "repair")
+}
+V3_CORPUS = V2_CORPUS
+V3_PROTOCOL = ROOT / "docs" / "EXPERIMENT_PROTOCOL_V3.md"
 
 
 class QuotaPause(RuntimeError):
@@ -57,14 +73,23 @@ def atomic_json(path: Path, value: Any) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         json.dump(value, handle, indent=2, sort_keys=True, ensure_ascii=False)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary = Path(handle.name)
     temporary.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def append_jsonl(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def prompt_hashes(files: dict[str, Path] | None = None) -> dict[str, str]:
@@ -120,12 +145,15 @@ def create_run(
 ) -> Path:
     if arm not in ("control", "theatre"):
         raise ValueError("arm must be control or theatre")
-    if protocol not in ("v1", "v2"):
-        raise ValueError("protocol must be v1 or v2")
-    role_prompts = V2_PROMPT_FILES if protocol == "v2" else PROMPT_FILES
-    v2_audit = audit_preregistration() if protocol == "v2" else None
+    if protocol not in ("v1", "v2", "v3"):
+        raise ValueError("protocol must be v1, v2, or v3")
+    role_prompts = V3_PROMPT_FILES if protocol == "v3" else V2_PROMPT_FILES if protocol == "v2" else PROMPT_FILES
+    v2_audit = audit_v2_preregistration() if protocol == "v2" else None
+    v3_audit = audit_v3_preregistration() if protocol == "v3" else None
     if v2_audit is not None and v2_audit["status"] != "passed":
         raise V2ContractError("v2 preregistration is invalid: " + "; ".join(v2_audit["errors"]))
+    if v3_audit is not None and v3_audit["status"] != "passed":
+        raise V3ContractError("v3 preregistration is invalid: " + "; ".join(v3_audit["errors"]))
     scenario = read_json(DEFAULT_SCENARIO)
     if days is not None:
         scenario["days"] = int(days)
@@ -135,13 +163,13 @@ def create_run(
     atomic_json(run_dir / "scenario.json", scenario)
     for role, prompt_path in role_prompts.items():
         shutil.copy2(prompt_path, run_dir / f"prompt-{role}.md")
-    if protocol == "v2":
-        shutil.copy2(V2_CORPUS, run_dir / "shared-corpus.md")
-        shutil.copy2(V2_PROTOCOL, run_dir / "protocol.md")
+    if protocol in ("v2", "v3"):
+        shutil.copy2(V3_CORPUS if protocol == "v3" else V2_CORPUS, run_dir / "shared-corpus.md")
+        shutil.copy2(V3_PROTOCOL if protocol == "v3" else V2_PROTOCOL, run_dir / "protocol.md")
     simulator = VendingSimulator(scenario, seed)
     atomic_json(run_dir / "state.json", simulator.state)
     manifest = {
-        "schema_version": 2 if protocol == "v2" else 1,
+        "schema_version": 3 if protocol == "v3" else 2 if protocol == "v2" else 1,
         "run_id": run_dir.name,
         "created_at": utc_now(),
         "arm": arm,
@@ -159,16 +187,19 @@ def create_run(
         "status": "ready",
         "usage_ledger_path": str((run_root / "usage-ledger.jsonl").resolve()),
     }
-    if protocol == "v2":
-        prereg = read_json(PREREGISTRATION)
+    if protocol in ("v2", "v3"):
+        audit = v3_audit if protocol == "v3" else v2_audit
+        prereg = read_json(V3_PREREGISTRATION if protocol == "v3" else V2_PREREGISTRATION)
         manifest.update({
             "inference_enabled": False,
-            "artifact_hashes": v2_audit["observed_hashes"],
+            "artifact_hashes": audit["observed_hashes"],
             "shared_corpus_hash": stable_hash((run_dir / "shared-corpus.md").read_text(encoding="utf-8")),
             "protocol_hash": stable_hash((run_dir / "protocol.md").read_text(encoding="utf-8")),
             "action_budget": int(scenario["max_actions_per_turn"]),
-            "v2_cadence": prereg["cadence"],
+            f"{protocol}_cadence": prereg["cadence"],
         })
+        if protocol == "v3":
+            manifest["repair_policy"] = prereg["repair_policy"]
     atomic_json(run_dir / "manifest.json", manifest)
     atomic_json(run_dir / "role-memory.json", {
         "critic": None,
@@ -185,6 +216,7 @@ def create_run(
         "phase": None,
         "review_required": None,
         "pending": {},
+        "pending_invocation": None,
         "updated_at": utc_now(),
     })
     return run_dir
@@ -202,7 +234,7 @@ def _role_message(
     # here would let a later merge silently change an in-flight treatment while
     # manifest.json continued to attest the older hash.
     prompt = (run_dir / f"prompt-{role}.md").read_text(encoding="utf-8")
-    if manifest.get("protocol_version") == "v2":
+    if manifest.get("protocol_version") in ("v2", "v3"):
         shared_evidence = {
             "business_state": view,
             "action_contract": view.get("allowed_actions"),
@@ -218,7 +250,8 @@ def _role_message(
             context["consciousness_passage"] = flow["pending"].get("consciousness")
         if role == "actor":
             context["planner_passage"] = flow["pending"].get("planner") or memories.get("planner")
-        return prompt + "\n\nCURRENT V2 INPUT\n" + json.dumps(context, sort_keys=True, ensure_ascii=False)
+        protocol = manifest["protocol_version"].upper()
+        return prompt + f"\n\nCURRENT {protocol} INPUT\n" + json.dumps(context, sort_keys=True, ensure_ascii=False)
     context = {"business_state": view}
     if role == "critic":
         context["prior_plan"] = memories.get("planner")
@@ -232,6 +265,25 @@ def _role_message(
     elif role == "control":
         context["prior_memory"] = memories.get("control", {}).get("memory") if isinstance(memories.get("control"), dict) else None
     return prompt + "\n\nCURRENT INPUT\n" + json.dumps(context, sort_keys=True, ensure_ascii=False)
+
+
+def _v3_repair_message(
+    run_dir: Path,
+    role: str,
+    original: dict[str, Any],
+    original_errors: list[str],
+    original_message: str,
+) -> str:
+    prompt = (run_dir / "prompt-repair.md").read_text(encoding="utf-8")
+    context = {
+        "role": role,
+        "original_response": original,
+        "deterministic_validation_errors": original_errors,
+        "original_current_input": original_message,
+    }
+    return prompt + "\n\nCURRENT V3 REPAIR INPUT\n" + json.dumps(
+        context, sort_keys=True, ensure_ascii=False
+    )
 
 
 def _critical_event(view: dict[str, Any]) -> bool:
@@ -252,6 +304,7 @@ def _record_model_result(
     manifest: dict[str, Any],
     role: str,
     result: ModelResult,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = {
         "timestamp": utc_now(),
@@ -267,6 +320,8 @@ def _record_model_result(
         "usage": result.usage,
         "response_hash": _model_response_hash(result),
     }
+    if evidence:
+        row.update(evidence)
     if result.parse_error is not None:
         row["outcome"] = "invalid_model_json"
         row["parse_error"] = result.parse_error
@@ -291,15 +346,83 @@ def _invoke_role(
     memories: dict[str, Any],
     budget: TokenBudget,
     transport: OpenClawCodexTransport,
+    *,
+    message_override: str | None = None,
+    attempt_kind: str = "original",
+    state_hash: str | None = None,
+    original_response_hash: str | None = None,
 ) -> dict[str, Any]:
     budget.assert_call_allowed()
-    result = transport.invoke(
-        _session_key(manifest, role),
-        _role_message(run_dir, manifest, role, view, flow, memories),
-    )
-    if result.provider != "openai" or result.model != manifest["model"].split("/", 1)[-1]:
-        raise RuntimeError(f"model drift detected: {result.provider}/{result.model}")
-    usage_row = _record_model_result(run_dir, manifest, role, result)
+    call_evidence: dict[str, Any] = {}
+    attempt_id = None
+    if manifest.get("protocol_version") == "v3":
+        serial = int(flow.get("provider_attempt_serial", 0)) + 1
+        flow["provider_attempt_serial"] = serial
+        atomic_json(run_dir / "flow.json", flow)
+        attempt_id = f"{manifest['run_id']}:{flow['turn_index']}:{role}:{attempt_kind}:{serial}"
+        call_evidence = {
+            "attempt_id": attempt_id,
+            "attempt_kind": attempt_kind,
+            "turn_index": flow["turn_index"],
+            "state_hash": state_hash,
+        }
+        if original_response_hash is not None:
+            call_evidence["original_response_hash"] = original_response_hash
+        append_jsonl(run_dir / "call-journal.jsonl", {
+            "event": "started",
+            "timestamp": utc_now(),
+            **call_evidence,
+            "role": role,
+        })
+    try:
+        result = transport.invoke(
+            _session_key(manifest, role),
+            message_override or _role_message(run_dir, manifest, role, view, flow, memories),
+        )
+    except ModelTransportError as exc:
+        if attempt_id is not None:
+            append_jsonl(run_dir / "call-journal.jsonl", {
+                "event": "transport_failed",
+                "timestamp": utc_now(),
+                **call_evidence,
+                "role": role,
+                "error": str(exc),
+            })
+        raise
+    usage_row = _record_model_result(run_dir, manifest, role, result, call_evidence)
+    expected_model = manifest["model"].split("/", 1)[-1]
+    if result.provider != "openai" or result.model != expected_model:
+        message = (
+            f"model drift detected: expected openai/{expected_model}, "
+            f"observed {result.provider}/{result.model}"
+        )
+        append_jsonl(run_dir / "model-failures.jsonl", {
+            "timestamp": usage_row["timestamp"],
+            "turn_index": flow["turn_index"],
+            "role": role,
+            "failure_kind": "model_drift",
+            "raw_text": result.text,
+            "response_hash": usage_row["response_hash"],
+            "parse_error": None,
+            "expected_provider": "openai",
+            "expected_model": expected_model,
+            "observed_provider": result.provider,
+            "observed_model": result.model,
+            "gateway_run_id": result.run_id,
+            "session_id": result.session_id,
+            **call_evidence,
+        })
+        if attempt_id is not None:
+            append_jsonl(run_dir / "call-journal.jsonl", {
+                "event": "completed",
+                "timestamp": utc_now(),
+                **call_evidence,
+                "role": role,
+                "outcome": "model_drift",
+                "response_hash": usage_row["response_hash"],
+            })
+        error = V3ContractError if manifest.get("protocol_version") == "v3" else V2ContractError
+        raise error(message)
     if result.parse_error is not None or result.content is None:
         append_jsonl(run_dir / "model-failures.jsonl", {
             "timestamp": usage_row["timestamp"],
@@ -310,15 +433,36 @@ def _invoke_role(
             "parse_error": result.parse_error or "model response did not contain a JSON object",
             "gateway_run_id": result.run_id,
             "session_id": result.session_id,
+            **call_evidence,
         })
-        raise V2ContractError(f"{role}: {result.parse_error or 'invalid model JSON'}")
+        if attempt_id is not None:
+            append_jsonl(run_dir / "call-journal.jsonl", {
+                "event": "completed",
+                "timestamp": utc_now(),
+                **call_evidence,
+                "role": role,
+                "outcome": "invalid_model_json",
+                "response_hash": usage_row["response_hash"],
+            })
+        error = V3ContractError if manifest.get("protocol_version") == "v3" else V2ContractError
+        raise error(f"{role}: {result.parse_error or 'invalid model JSON'}")
     append_jsonl(run_dir / "model-decisions.jsonl", {
         "timestamp": utc_now(),
         "turn_index": flow["turn_index"],
         "role": role,
         "content": result.content,
         "response_hash": usage_row["response_hash"],
+        **call_evidence,
     })
+    if attempt_id is not None:
+        append_jsonl(run_dir / "call-journal.jsonl", {
+            "event": "completed",
+            "timestamp": utc_now(),
+            **call_evidence,
+            "role": role,
+            "outcome": "parseable_json",
+            "response_hash": usage_row["response_hash"],
+        })
     return result.content
 
 
@@ -330,7 +474,7 @@ def _output_tokens(run_dir: Path) -> int:
         return sum(int(json.loads(line)["usage"].get("output", 0)) for line in handle if line.strip())
 
 
-def _v2_activation_allows(run_dir: Path, manifest: dict[str, Any]) -> bool:
+def _official_activation_allows(run_dir: Path, manifest: dict[str, Any]) -> bool:
     pair_dir_raw = manifest.get("pair_dir")
     expected_hash = manifest.get("activation_receipt_sha256")
     if not isinstance(pair_dir_raw, str) or not isinstance(expected_hash, str):
@@ -339,12 +483,19 @@ def _v2_activation_allows(run_dir: Path, manifest: dict[str, Any]) -> bool:
     if not activation.is_file() or hashlib.sha256(activation.read_bytes()).hexdigest() != expected_hash:
         return False
     receipt = read_json(activation)
+    pair = read_json(Path(pair_dir_raw) / "pair.json")
     return (
-        receipt.get("pair_id") == manifest.get("pair_id")
+        receipt.get("protocol") == manifest.get("protocol_version")
+        and receipt.get("official") is True
+        and receipt.get("pair_id") == manifest.get("pair_id")
         and receipt.get("artifact_hashes") == manifest.get("artifact_hashes")
         and receipt.get("source_commit") == manifest.get("source_commit")
         and receipt.get("preregistration_sha256") == manifest.get("preregistration_sha256")
         and receipt.get("seed") == manifest.get("seed")
+        and pair.get("official") is True
+        and pair.get("inference_enabled") is True
+        and pair.get("source_commit") == manifest.get("source_commit")
+        and pair.get("activation_receipt_sha256") == expected_hash
     )
 
 
@@ -367,10 +518,202 @@ def _v2_schedule(manifest: dict[str, Any], flow: dict[str, Any], view: dict[str,
     }
 
 
+def _v3_schedule(manifest: dict[str, Any], flow: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+    cadence = manifest["v3_cadence"]
+    turn_index = int(flow["turn_index"])
+    strategic_due = (
+        turn_index % int(cadence["strategic_review_every_turns"]) == 0
+        or _critical_event(view)
+    )
+    consciousness_due = (
+        bool(cadence.get("consciousness_on_first_turn")) and turn_index == 0
+        or turn_index % int(cadence["consciousness_every_turns"]) == 0
+    )
+    return {
+        "turn_index": turn_index,
+        "strategic_review_due": strategic_due,
+        "consciousness_due": consciousness_due,
+        "critical_simulator_event": _critical_event(view),
+    }
+
+
 def _require_valid_role(role: str, value: Any) -> None:
-    report = validate_role_output(role, value)
+    report = validate_v2_role_output(role, value)
     if report["status"] != "passed":
         raise V2ContractError(f"{role}: " + "; ".join(report["errors"]))
+
+
+def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    rows.append(value)
+    return rows
+
+
+def _resume_v3_invocation(
+    run_dir: Path, role: str, turn_index: int, state_hash: str
+) -> dict[str, Any] | None:
+    rows = [
+        row for row in _jsonl_rows(run_dir / "role-invocations.jsonl")
+        if row.get("role") == role
+        and row.get("turn_index") == turn_index
+        and row.get("state_hash") == state_hash
+        and row.get("outcome") in ("accepted_first_pass", "accepted_repair")
+    ]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise V3ContractError(f"{role}: duplicate accepted invocation evidence")
+    accepted_hash = rows[0].get("accepted_response_hash")
+    decisions = [
+        row for row in _jsonl_rows(run_dir / "model-decisions.jsonl")
+        if row.get("turn_index") == turn_index
+        and row.get("role") == role
+        and row.get("response_hash") == accepted_hash
+    ]
+    if len(decisions) != 1 or not isinstance(decisions[0].get("content"), dict):
+        raise V3ContractError(f"{role}: accepted invocation is not bound to one decision")
+    return decisions[0]["content"]
+
+
+def _invoke_v3_role(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    role: str,
+    view: dict[str, Any],
+    flow: dict[str, Any],
+    memories: dict[str, Any],
+    budget: TokenBudget,
+    transport: OpenClawCodexTransport,
+    state_hash: str,
+    validator: Any = None,
+) -> dict[str, Any]:
+    """Execute or resume exactly one v3 role invocation with one paid repair."""
+    validator = validator or (lambda value: validate_v3_role_output(role, value))
+    resumed = _resume_v3_invocation(run_dir, role, int(flow["turn_index"]), state_hash)
+    if resumed is not None:
+        return resumed
+
+    pending = flow.get("pending_invocation")
+    if pending is not None:
+        if not isinstance(pending, dict) or any(
+            pending.get(key) != expected
+            for key, expected in (
+                ("role", role),
+                ("turn_index", flow["turn_index"]),
+                ("state_hash", state_hash),
+            )
+        ):
+            raise V3ContractError(f"{role}: pending repair identity differs from current role/turn/state")
+    else:
+        original_message = _role_message(run_dir, manifest, role, view, flow, memories)
+        original = _invoke_role(
+            run_dir,
+            manifest,
+            role,
+            view,
+            flow,
+            memories,
+            budget,
+            transport,
+            message_override=original_message,
+            attempt_kind="original",
+            state_hash=state_hash,
+        )
+        report = validator(original)
+        original_hash = stable_hash(original)
+        if report["status"] == "passed":
+            append_jsonl(run_dir / "role-invocations.jsonl", {
+                "schema_version": 1,
+                "timestamp": utc_now(),
+                "turn_index": flow["turn_index"],
+                "role": role,
+                "state_hash": state_hash,
+                "outcome": "accepted_first_pass",
+                "original_response_hash": original_hash,
+                "original_validation_errors": [],
+                "repair_response_hash": None,
+                "repair_validation_errors": [],
+                "accepted_response_hash": original_hash,
+            })
+            return original
+        pending = {
+            "role": role,
+            "turn_index": flow["turn_index"],
+            "state_hash": state_hash,
+            "original": original,
+            "original_response_hash": original_hash,
+            "original_validation_errors": report["errors"],
+            "original_message": original_message,
+        }
+        flow["pending_invocation"] = pending
+        flow["updated_at"] = utc_now()
+        atomic_json(run_dir / "flow.json", flow)
+
+    repair = _invoke_role(
+        run_dir,
+        manifest,
+        role,
+        view,
+        flow,
+        memories,
+        budget,
+        transport,
+        message_override=_v3_repair_message(
+            run_dir,
+            role,
+            pending["original"],
+            pending["original_validation_errors"],
+            pending["original_message"],
+        ),
+        attempt_kind="repair",
+        state_hash=state_hash,
+        original_response_hash=pending["original_response_hash"],
+    )
+    envelope = {
+        "attempt": 1,
+        "role": role,
+        "turn_index": flow["turn_index"],
+        "state_hash": state_hash,
+        "original_validation_errors": pending["original_validation_errors"],
+        "original_response_sha256": pending["original_response_hash"],
+        "replacement": repair,
+    }
+    envelope_report = validate_repair_envelope(
+        envelope, role=role, turn_index=int(flow["turn_index"]), state_hash=state_hash
+    )
+    final_report = validator(repair)
+    repair_errors = [
+        *envelope_report["errors"],
+        *(item for item in final_report["errors"] if item not in envelope_report["errors"]),
+    ]
+    outcome = "accepted_repair" if not repair_errors else "failed_contract_after_repair"
+    repair_hash = stable_hash(repair)
+    append_jsonl(run_dir / "role-invocations.jsonl", {
+        "schema_version": 1,
+        "timestamp": utc_now(),
+        "turn_index": flow["turn_index"],
+        "role": role,
+        "state_hash": state_hash,
+        "outcome": outcome,
+        "original_response_hash": pending["original_response_hash"],
+        "original_validation_errors": pending["original_validation_errors"],
+        "repair_response_hash": repair_hash,
+        "repair_validation_errors": repair_errors,
+        "accepted_response_hash": repair_hash if not repair_errors else None,
+    })
+    flow["pending_invocation"] = None
+    flow["updated_at"] = utc_now()
+    atomic_json(run_dir / "flow.json", flow)
+    if repair_errors:
+        raise V3ContractError(f"{role}: repair failed: " + "; ".join(repair_errors))
+    return repair
 
 
 def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, Any]:
@@ -380,15 +723,16 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
     state = read_json(run_dir / "state.json")
     flow = read_json(run_dir / "flow.json")
     memories = read_json(run_dir / "role-memory.json")
+    protocol = manifest.get("protocol_version", "v1")
     simulator = VendingSimulator(scenario, manifest["seed"], state=state)
     if simulator.state["terminated"]:
         return finalize_run(run_dir)
-    if manifest.get("protocol_version") == "v2" and (
-        not manifest.get("inference_enabled") or not _v2_activation_allows(run_dir, manifest)
+    if protocol in ("v2", "v3") and (
+        not manifest.get("inference_enabled") or not _official_activation_allows(run_dir, manifest)
     ):
         return {
             "status": "blocked_preregistration",
-            "reason": "v2 pair is offline-only until the exact published source commit is activated",
+            "reason": f"{protocol} pair is offline-only until the exact published source commit is activated",
             "run_dir": str(run_dir),
         }
     transport = OpenClawCodexTransport(
@@ -396,9 +740,13 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
     )
     budget = TokenBudget(_usage_ledger_path(manifest), daily_token_budget)
     view = simulator.public_view()
+    state_hash = stable_hash(simulator.state)
 
     if flow["current_step"] == "prepare_turn":
-        if manifest.get("protocol_version") == "v2":
+        if protocol == "v3":
+            schedule = _v3_schedule(manifest, flow, view)
+            review_required = manifest["arm"] == "theatre" and schedule["strategic_review_due"]
+        elif protocol == "v2":
             schedule = _v2_schedule(manifest, flow, view)
             review_required = manifest["arm"] == "theatre" and schedule["strategic_review_due"]
         else:
@@ -412,16 +760,29 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             "review_required": review_required,
             "schedule": schedule,
             "pending": {},
+            "pending_invocation": None,
+            "turn_state_hash": state_hash,
             "current_step": "model_roles",
             "updated_at": utc_now(),
         })
         atomic_json(run_dir / "flow.json", flow)
+    elif protocol == "v3" and flow.get("turn_state_hash") != state_hash:
+        raise V3ContractError("v3 current simulator state differs from the frozen turn identity")
+
+    def invoke_current(role: str, validator: Any = None) -> dict[str, Any]:
+        if protocol == "v3":
+            return _invoke_v3_role(
+                run_dir, manifest, role, view, flow, memories, budget, transport,
+                state_hash, validator=validator,
+            )
+        return _invoke_role(run_dir, manifest, role, view, flow, memories, budget, transport)
 
     try:
         if flow["phase"] == "critic":
-            flow["pending"]["critic"] = _invoke_role(run_dir, manifest, "critic", view, flow, memories, budget, transport)
-            if manifest.get("protocol_version") == "v2":
+            flow["pending"]["critic"] = invoke_current("critic")
+            if protocol == "v2":
                 _require_valid_role("critic", flow["pending"]["critic"])
+            if protocol in ("v2", "v3"):
                 flow["schedule"]["consciousness_due"] = bool(
                     flow["schedule"].get("consciousness_due")
                     or flow["pending"]["critic"].get("verdict") == "critical"
@@ -429,7 +790,7 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             memories["critic"] = flow["pending"]["critic"]
             flow["phase"] = (
                 "consciousness"
-                if manifest.get("protocol_version") == "v2" and flow["schedule"]["consciousness_due"]
+                if protocol in ("v2", "v3") and flow["schedule"]["consciousness_due"]
                 else "planner"
             )
             flow["updated_at"] = utc_now()
@@ -437,10 +798,9 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             atomic_json(run_dir / "flow.json", flow)
             return {"status": "running", "completed_role": "critic", "next_role": flow["phase"], "run_dir": str(run_dir)}
         if flow["phase"] == "consciousness":
-            flow["pending"]["consciousness"] = _invoke_role(
-                run_dir, manifest, "consciousness", view, flow, memories, budget, transport
-            )
-            _require_valid_role("consciousness", flow["pending"]["consciousness"])
+            flow["pending"]["consciousness"] = invoke_current("consciousness")
+            if protocol == "v2":
+                _require_valid_role("consciousness", flow["pending"]["consciousness"])
             memories["consciousness"] = flow["pending"]["consciousness"]
             flow["phase"] = "planner"
             flow["updated_at"] = utc_now()
@@ -448,8 +808,8 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             atomic_json(run_dir / "flow.json", flow)
             return {"status": "running", "completed_role": "consciousness", "next_role": "planner", "run_dir": str(run_dir)}
         if flow["phase"] == "planner":
-            flow["pending"]["planner"] = _invoke_role(run_dir, manifest, "planner", view, flow, memories, budget, transport)
-            if manifest.get("protocol_version") == "v2":
+            flow["pending"]["planner"] = invoke_current("planner")
+            if protocol == "v2":
                 _require_valid_role("planner", flow["pending"]["planner"])
             memories["planner"] = flow["pending"]["planner"]
             flow["phase"] = "actor"
@@ -458,13 +818,24 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             atomic_json(run_dir / "flow.json", flow)
             return {"status": "running", "completed_role": "planner", "next_role": "actor", "run_dir": str(run_dir)}
         role = "actor" if manifest["arm"] == "theatre" else "control"
-        decision = _invoke_role(run_dir, manifest, role, view, flow, memories, budget, transport)
+        if protocol == "v3" and role == "actor":
+            planner = flow["pending"].get("planner") or memories.get("planner")
+            critic = flow["pending"].get("critic") or memories.get("critic")
+            consciousness = flow["pending"].get("consciousness")
+            decision = invoke_current(
+                role,
+                validator=lambda candidate: validate_v3_theatre_handoff(
+                    critic, planner, candidate, consciousness
+                ),
+            )
+        else:
+            decision = invoke_current(role)
         memories[role] = decision
         decision_audit = None
-        if manifest.get("protocol_version") == "v2":
+        if protocol == "v2":
             if role == "control":
                 _require_valid_role("control", decision)
-                actions = extract_actions("control", decision)
+                actions = extract_v2_actions("control", decision)
                 decision_audit = {
                     "schema_version": 1,
                     "status": "passed",
@@ -477,7 +848,7 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
                 review_required = bool(flow.get("review_required"))
                 planner = flow["pending"].get("planner") or memories.get("planner")
                 consciousness = flow["pending"].get("consciousness")
-                handoff = validate_theatre_handoff(
+                handoff = validate_v2_theatre_handoff(
                     flow["pending"].get("critic"),
                     planner,
                     decision,
@@ -489,9 +860,39 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
                 )
                 if handoff["status"] != "passed":
                     raise V2ContractError("theatre handoff: " + "; ".join(handoff["errors"]))
-                actions = extract_actions("actor", decision)
+                actions = extract_v2_actions("actor", decision)
                 decision_audit = {
                     "schema_version": 1,
+                    "status": "passed",
+                    "arm": "theatre",
+                    "schedule": flow.get("schedule", {}),
+                    **{key: value for key, value in handoff.items() if key not in ("status", "errors")},
+                    "action_count": len(actions),
+                    "actions": actions,
+                }
+        elif protocol == "v3":
+            if role == "control":
+                audit = validate_v3_role_output("control", decision)
+                if audit["status"] != "passed":
+                    raise V3ContractError("control: " + "; ".join(audit["errors"]))
+                actions = [deepcopy(item["action"]) for item in decision["execution_queue"]]
+                plan_items = decision["plan"]["action_queue"]
+                decision_audit = {
+                    "schema_version": 2,
+                    "status": "passed",
+                    "arm": "control",
+                    "schedule": flow.get("schedule", {}),
+                    "plan_timing": {item["id"]: item["timing"] for item in plan_items},
+                    "action_count": len(actions),
+                    "actions": actions,
+                }
+            else:
+                handoff = validate_v3_theatre_handoff(critic, planner, decision, consciousness)
+                if handoff["status"] != "passed":
+                    raise V3ContractError("theatre handoff: " + "; ".join(handoff["errors"]))
+                actions = [deepcopy(item["action"]) for item in decision["execution_queue"]]
+                decision_audit = {
+                    "schema_version": 2,
                     "status": "passed",
                     "arm": "theatre",
                     "schedule": flow.get("schedule", {}),
@@ -534,11 +935,19 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             "review_required": None,
             "schedule": {},
             "pending": {},
+            "pending_invocation": None,
+            "turn_state_hash": None,
             "updated_at": utc_now(),
         })
         atomic_json(run_dir / "flow.json", flow)
         if simulator.state["terminated"]:
             return finalize_run(run_dir)
+        next_review_due = False
+        if protocol in ("v2", "v3"):
+            cadence = manifest[f"{protocol}_cadence"]
+            next_review_due = flow["turn_index"] % int(cadence["strategic_review_every_turns"]) == 0
+        elif protocol == "v1":
+            next_review_due = flow["turn_index"] % manifest["theatre_review_every_turns"] == 0
         return {
             "status": "running",
             "completed_role": role,
@@ -546,17 +955,12 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
             "score": simulator.score(_output_tokens(run_dir)),
             "next_role": (
                 "critic"
-                if manifest["arm"] == "theatre" and (
-                    manifest.get("protocol_version") == "v2"
-                    and flow["turn_index"] % int(manifest["v2_cadence"]["strategic_review_every_turns"]) == 0
-                    or manifest.get("protocol_version") != "v2"
-                    and flow["turn_index"] % manifest["theatre_review_every_turns"] == 0
-                )
+                if manifest["arm"] == "theatre" and next_review_due
                 else role
             ),
             "run_dir": str(run_dir),
         }
-    except V2ContractError as exc:
+    except (V2ContractError, V3ContractError) as exc:
         flow["status"] = "failed_contract"
         flow["updated_at"] = utc_now()
         flow["contract_failure"] = {"phase": flow.get("phase"), "message": str(exc)}
@@ -564,6 +968,12 @@ def step_run(run_dir: Path, daily_token_budget: int | None = None) -> dict[str, 
         return {"status": "failed_contract", "reason": str(exc), "run_dir": str(run_dir)}
     except (QuotaPause, ModelTransportError) as exc:
         if isinstance(exc, ModelTransportError):
+            if protocol == "v3":
+                flow["status"] = "failed_contract"
+                flow["updated_at"] = utc_now()
+                flow["contract_failure"] = {"phase": flow.get("phase"), "message": str(exc)}
+                atomic_json(run_dir / "flow.json", flow)
+                return {"status": "failed_contract", "reason": str(exc), "run_dir": str(run_dir)}
             message = str(exc).lower()
             quota_markers = ("quota", "rate limit", "rate_limit", "usage limit", "too many requests", "429")
             if not any(marker in message for marker in quota_markers):
@@ -607,18 +1017,20 @@ def create_pair(
     protocol: str = "v1",
     next_arm: str | None = None,
 ) -> Path:
-    if protocol == "v2":
-        planned = seed_plan(seed)
+    if protocol in ("v2", "v3"):
+        planned = v3_seed_plan(seed) if protocol == "v3" else v2_seed_plan(seed)
         if days != planned["days"] or model != planned["model"] or thinking != planned["thinking"]:
-            raise V2ContractError("v2 horizon, model, or thinking differs from preregistration")
+            error = f"{protocol} horizon, model, or thinking differs from preregistration"
+            raise V3ContractError(error) if protocol == "v3" else V2ContractError(error)
         if next_arm is None:
             next_arm = planned["first_arm"]
         elif next_arm != planned["first_arm"]:
-            raise V2ContractError("v2 first arm differs from preregistration")
+            error = f"{protocol} first arm differs from preregistration"
+            raise V3ContractError(error) if protocol == "v3" else V2ContractError(error)
     elif protocol == "v1" and next_arm is None:
         next_arm = "control"
-    elif protocol not in ("v1", "v2"):
-        raise ValueError("protocol must be v1 or v2")
+    elif protocol not in ("v1", "v2", "v3"):
+        raise ValueError("protocol must be v1, v2, or v3")
     if next_arm not in ("control", "theatre"):
         raise ValueError("next_arm must be control or theatre")
     pair_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-pair-s{seed}"
@@ -627,10 +1039,13 @@ def create_pair(
     pair_dir.mkdir(parents=True, exist_ok=False)
     preregistration_sha256 = None
     artifact_hashes = None
-    if protocol == "v2":
-        shutil.copy2(PREREGISTRATION, pair_dir / "preregistration.json")
+    if protocol in ("v2", "v3"):
+        prereg_path = V3_PREREGISTRATION if protocol == "v3" else V2_PREREGISTRATION
+        shutil.copy2(prereg_path, pair_dir / "preregistration.json")
         preregistration_sha256 = hashlib.sha256((pair_dir / "preregistration.json").read_bytes()).hexdigest()
-        artifact_hashes = audit_preregistration()["observed_hashes"]
+        artifact_hashes = (
+            audit_v3_preregistration() if protocol == "v3" else audit_v2_preregistration()
+        )["observed_hashes"]
     control = create_run(
         "control", seed, days, run_root=run_root, model=model, agent_id=agent_id,
         thinking=thinking, protocol=protocol,
@@ -652,15 +1067,15 @@ def create_pair(
         "next_arm": next_arm,
         "first_arm": next_arm,
         "protocol_version": protocol,
-        "inference_enabled": protocol != "v2",
+        "inference_enabled": protocol == "v1",
         "status": "ready",
         "official": False,
     }
-    if protocol == "v2":
+    if protocol in ("v2", "v3"):
         pair["preregistration_sha256"] = preregistration_sha256
         pair["artifact_hashes"] = artifact_hashes
     atomic_json(pair_dir / "pair.json", pair)
-    if protocol == "v2":
+    if protocol in ("v2", "v3"):
         for run_dir in (control, theatre):
             manifest = read_json(run_dir / "manifest.json")
             manifest.update({
@@ -680,6 +1095,13 @@ def _run_progress(run_dir: Path) -> tuple[int, bool]:
 def step_pair(pair_dir: Path, daily_token_budget: int | None = None) -> dict[str, Any]:
     pair_path = pair_dir / "pair.json"
     pair = read_json(pair_path)
+    if pair.get("status") == "failed_contract":
+        return {
+            "status": "failed_contract",
+            "pair_id": pair.get("pair_id"),
+            "pair_status": "failed_contract",
+            "reason": "terminal contract evidence is immutable and cannot be resumed",
+        }
     control = Path(pair["control_run"])
     theatre = Path(pair["theatre_run"])
     control_day, control_done = _run_progress(control)

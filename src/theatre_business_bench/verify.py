@@ -10,12 +10,20 @@ from .runner import PROMPT_FILES, read_json
 from .simulator import VendingSimulator, stable_hash
 from .transport import ModelTransportError, parse_json_object
 from .v2 import (
-    PREREGISTRATION,
-    audit_preregistration,
-    extract_actions,
-    seed_plan,
-    validate_role_output,
-    validate_theatre_handoff,
+    PREREGISTRATION as V2_PREREGISTRATION,
+    audit_preregistration as audit_v2_preregistration,
+    extract_actions as extract_v2_actions,
+    seed_plan as v2_seed_plan,
+    validate_role_output as validate_v2_role_output,
+    validate_theatre_handoff as validate_v2_theatre_handoff,
+)
+from .v3 import (
+    PREREGISTRATION as V3_PREREGISTRATION,
+    audit_preregistration as audit_v3_preregistration,
+    seed_plan as v3_seed_plan,
+    validate_repair_envelope,
+    validate_role_output as validate_v3_role_output,
+    validate_theatre_handoff as validate_v3_theatre_handoff,
 )
 
 
@@ -61,6 +69,7 @@ def _verify_run(
     state = read_json(run_dir / "state.json")
     flow = read_json(run_dir / "flow.json")
     run_id = manifest.get("run_id")
+    protocol = manifest.get("protocol_version", "v1")
 
     if run_dir.name != run_id:
         errors.append(f"{expected_arm}: run directory does not match manifest run_id")
@@ -72,16 +81,19 @@ def _verify_run(
         errors.append(f"{expected_arm}: scenario hash mismatch")
 
     prompt_hashes = manifest.get("prompt_hashes", {})
-    expected_prompt_roles = set(prompt_hashes) if manifest.get("protocol_version") == "v2" else set(PROMPT_FILES)
+    expected_prompt_roles = set(prompt_hashes) if protocol in ("v2", "v3") else set(PROMPT_FILES)
     for role in expected_prompt_roles:
         snapshot = run_dir / f"prompt-{role}.md"
         if not snapshot.is_file():
             errors.append(f"{expected_arm}: missing frozen prompt for {role}")
         elif stable_hash(snapshot.read_text(encoding="utf-8")) != prompt_hashes.get(role):
             errors.append(f"{expected_arm}: frozen prompt hash mismatch for {role}")
-    if manifest.get("protocol_version") == "v2":
-        if expected_prompt_roles != {"control", "critic", "consciousness", "planner", "actor"}:
-            errors.append(f"{expected_arm}: v2 prompt role set mismatch")
+    if protocol in ("v2", "v3"):
+        expected_roles = {"control", "critic", "consciousness", "planner", "actor"}
+        if protocol == "v3":
+            expected_roles.add("repair")
+        if expected_prompt_roles != expected_roles:
+            errors.append(f"{expected_arm}: {protocol} prompt role set mismatch")
         for name, field in (("shared-corpus.md", "shared_corpus_hash"), ("protocol.md", "protocol_hash")):
             snapshot = run_dir / name
             if not snapshot.is_file():
@@ -101,6 +113,8 @@ def _verify_run(
     usage = _read_jsonl(run_dir / "usage.jsonl", errors)
     decisions = _read_jsonl(run_dir / "model-decisions.jsonl", errors)
     failures = _read_jsonl(run_dir / "model-failures.jsonl", errors)
+    invocations = _read_jsonl(run_dir / "role-invocations.jsonl", errors)
+    call_journal = _read_jsonl(run_dir / "call-journal.jsonl", errors)
     turns = _read_jsonl(run_dir / "turns.jsonl", errors)
     if len(usage) != len(decisions) + len(failures):
         errors.append(
@@ -134,13 +148,163 @@ def _verify_run(
             and not failures
         )
 
+    accepted_v3: dict[tuple[int, str], str] = {}
+    referenced_v3_hashes: Counter[tuple[int, str, str, str]] = Counter()
+    if protocol == "v3":
+        for index, invocation in enumerate(invocations):
+            role = invocation.get("role")
+            turn_index = invocation.get("turn_index")
+            state_hash = invocation.get("state_hash")
+            outcome = invocation.get("outcome")
+            original_hash = invocation.get("original_response_hash")
+            repair_hash = invocation.get("repair_response_hash")
+            original_errors = invocation.get("original_validation_errors")
+            repair_errors = invocation.get("repair_validation_errors")
+            accepted_hash = invocation.get("accepted_response_hash")
+            if role not in ("control", "critic", "consciousness", "planner", "actor"):
+                errors.append(f"{expected_arm}: invocation {index} has unknown role")
+                continue
+            if not isinstance(turn_index, int) or turn_index < 0:
+                errors.append(f"{expected_arm}: invocation {index} has invalid turn")
+            if not isinstance(state_hash, str) or len(state_hash) != 64:
+                errors.append(f"{expected_arm}: invocation {index} has invalid state hash")
+            if not isinstance(original_errors, list) or not isinstance(repair_errors, list):
+                errors.append(f"{expected_arm}: invocation {index} has invalid validation errors")
+                continue
+            original_decisions = [
+                item for item in decisions
+                if item.get("turn_index") == turn_index
+                and item.get("role") == role
+                and item.get("response_hash") == original_hash
+                and item.get("attempt_kind") == "original"
+            ]
+            if len(original_decisions) != 1:
+                errors.append(f"{expected_arm}: invocation {index} does not bind one original decision")
+                continue
+            referenced_v3_hashes[(turn_index, role, original_hash, "original")] += 1
+            original_report = validate_v3_role_output(role, original_decisions[0].get("content"))
+            if (
+                role == "actor"
+                and any(
+                    item not in original_errors and f"actor: {item}" not in original_errors
+                    for item in original_report["errors"]
+                )
+                or role != "actor"
+                and original_report["errors"] != original_errors
+            ):
+                errors.append(f"{expected_arm}: invocation {index} original validation errors mismatch")
+            repair_decisions = [
+                item for item in decisions
+                if item.get("turn_index") == turn_index
+                and item.get("role") == role
+                and item.get("response_hash") == repair_hash
+                and item.get("attempt_kind") == "repair"
+                and item.get("original_response_hash") == original_hash
+            ] if repair_hash is not None else []
+            if outcome == "accepted_first_pass":
+                if original_errors or repair_hash is not None or repair_errors or accepted_hash != original_hash:
+                    errors.append(f"{expected_arm}: invocation {index} first-pass outcome is inconsistent")
+            elif outcome in ("accepted_repair", "failed_contract_after_repair"):
+                if not original_errors or len(repair_decisions) != 1:
+                    errors.append(f"{expected_arm}: invocation {index} does not bind one eligible repair")
+                else:
+                    referenced_v3_hashes[(turn_index, role, repair_hash, "repair")] += 1
+                    envelope = {
+                        "attempt": 1,
+                        "role": role,
+                        "turn_index": turn_index,
+                        "state_hash": state_hash,
+                        "original_validation_errors": original_errors,
+                        "original_response_sha256": original_hash,
+                        "replacement": repair_decisions[0].get("content"),
+                    }
+                    envelope_report = validate_repair_envelope(
+                        envelope, role=role, turn_index=turn_index, state_hash=state_hash
+                    )
+                    if outcome == "accepted_repair" and (
+                        repair_errors or envelope_report["status"] != "passed" or accepted_hash != repair_hash
+                    ):
+                        errors.append(f"{expected_arm}: invocation {index} accepted repair is inconsistent")
+                    if outcome == "failed_contract_after_repair" and (
+                        not repair_errors or accepted_hash is not None
+                    ):
+                        errors.append(f"{expected_arm}: invocation {index} terminal repair is inconsistent")
+            else:
+                errors.append(f"{expected_arm}: invocation {index} has unknown outcome")
+            if outcome in ("accepted_first_pass", "accepted_repair"):
+                key = (turn_index, role)
+                if key in accepted_v3:
+                    errors.append(f"{expected_arm}: duplicate accepted invocation for turn/role")
+                elif isinstance(accepted_hash, str):
+                    accepted_v3[key] = accepted_hash
+
+        pending = flow.get("pending_invocation")
+        pending_key = None
+        pending_hash = None
+        if isinstance(pending, dict):
+            pending_key = (pending.get("turn_index"), pending.get("role"))
+            pending_hash = pending.get("original_response_hash")
+            pending_decisions = [
+                item for item in decisions
+                if item.get("turn_index") == pending_key[0]
+                and item.get("role") == pending_key[1]
+                and item.get("response_hash") == pending_hash
+                and item.get("attempt_kind") == "original"
+            ]
+            if len(pending_decisions) != 1 or pending.get("state_hash") != stable_hash(state):
+                errors.append(f"{expected_arm}: pending repair is not bound to current state/decision")
+            else:
+                report = validate_v3_role_output(pending_key[1], pending_decisions[0].get("content"))
+                pending_errors = pending.get("original_validation_errors")
+                invalid_binding = (
+                    pending_key[1] == "actor"
+                    and not isinstance(pending_errors, list)
+                    or pending_key[1] != "actor"
+                    and report["errors"] != pending_errors
+                )
+                if not pending_errors or invalid_binding:
+                    errors.append(f"{expected_arm}: pending repair is not bound to a structural failure")
+                referenced_v3_hashes[(pending_key[0], pending_key[1], pending_hash, "original")] += 1
+
+        for decision in decisions:
+            key = (
+                decision.get("turn_index"), decision.get("role"),
+                decision.get("response_hash"), decision.get("attempt_kind"),
+            )
+            if referenced_v3_hashes[key] != 1:
+                errors.append(f"{expected_arm}: v3 decision is not referenced exactly once by invocation state")
+                break
+
+        journal_by_attempt: dict[str, list[dict[str, Any]]] = {}
+        for row in call_journal:
+            attempt_id = row.get("attempt_id")
+            if not isinstance(attempt_id, str) or not attempt_id:
+                errors.append(f"{expected_arm}: call journal row lacks attempt id")
+                continue
+            journal_by_attempt.setdefault(attempt_id, []).append(row)
+        usage_by_attempt = Counter(row.get("attempt_id") for row in usage)
+        evidence_by_attempt = Counter(row.get("attempt_id") for row in [*decisions, *failures])
+        for attempt_id, events in journal_by_attempt.items():
+            if len(events) != 2 or events[0].get("event") != "started" or events[1].get("event") not in ("completed", "transport_failed"):
+                errors.append(f"{expected_arm}: call journal attempt {attempt_id} is incomplete or reordered")
+                continue
+            if events[1].get("event") == "completed":
+                if usage_by_attempt[attempt_id] != 1 or evidence_by_attempt[attempt_id] != 1:
+                    errors.append(f"{expected_arm}: completed call journal attempt lacks one usage/evidence row")
+            elif usage_by_attempt[attempt_id] or evidence_by_attempt[attempt_id]:
+                errors.append(f"{expected_arm}: transport-failed attempt unexpectedly has usage/evidence")
+        if set(item for item in usage_by_attempt if item is not None) != set(
+            key for key, events in journal_by_attempt.items() if events[-1].get("event") == "completed"
+        ):
+            errors.append(f"{expected_arm}: v3 usage attempts differ from completed call journal")
+
     for index, decision in enumerate(decisions):
         content = decision.get("content")
         if stable_hash(content) != decision.get("response_hash"):
             errors.append(f"{expected_arm}: decision {index} response hash mismatch")
-        if manifest.get("protocol_version") == "v2":
+        if protocol == "v2":
             role = decision.get("role")
-            report = validate_role_output(role, content) if isinstance(role, str) else {"status": "failed", "errors": ["missing role"]}
+            report = validate_v2_role_output(role, content) if isinstance(role, str) else {"status": "failed", "errors": ["missing role"]}
             if report["status"] != "passed" and not (
                 isinstance(role, str)
                 and is_terminal_contract_decision(index, decision, role, report["errors"])
@@ -152,15 +316,34 @@ def _verify_run(
         if not isinstance(raw_text, str):
             errors.append(f"{expected_arm}: model failure {index} is missing raw_text")
             continue
-        if stable_hash(raw_text) != failure.get("response_hash"):
-            errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
-        try:
-            parse_json_object(raw_text)
-        except ModelTransportError as exc:
-            if failure.get("parse_error") != str(exc):
-                errors.append(f"{expected_arm}: model failure {index} parse error mismatch")
+        if failure.get("failure_kind") == "model_drift":
+            try:
+                drift_content = parse_json_object(raw_text)
+            except ModelTransportError:
+                drift_identity = stable_hash(raw_text)
+            else:
+                drift_identity = stable_hash(drift_content)
+            if drift_identity != failure.get("response_hash"):
+                errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
+            if (
+                failure.get("expected_provider") != "openai"
+                or failure.get("expected_model") != str(manifest.get("model", "")).split("/", 1)[-1]
+                or (
+                    failure.get("observed_provider") == failure.get("expected_provider")
+                    and failure.get("observed_model") == failure.get("expected_model")
+                )
+            ):
+                errors.append(f"{expected_arm}: model failure {index} has invalid drift evidence")
         else:
-            errors.append(f"{expected_arm}: model failure {index} contains valid JSON")
+            if stable_hash(raw_text) != failure.get("response_hash"):
+                errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
+            try:
+                parse_json_object(raw_text)
+            except ModelTransportError as exc:
+                if failure.get("parse_error") != str(exc):
+                    errors.append(f"{expected_arm}: model failure {index} parse error mismatch")
+            else:
+                errors.append(f"{expected_arm}: model failure {index} contains valid JSON")
 
     evidence_counter = Counter(
         (item.get("role"), item.get("response_hash"))
@@ -179,7 +362,20 @@ def _verify_run(
         if row.get("seed") != manifest.get("seed"):
             errors.append(f"{expected_arm}: usage seed mismatch at call {index}")
         if row.get("provider") != "openai" or row.get("model") != expected_model:
-            errors.append(f"{expected_arm}: usage model/provider drift at call {index}")
+            matching_drift = [
+                failure for failure in failures
+                if failure.get("failure_kind") == "model_drift"
+                and failure.get("role") == row.get("role")
+                and failure.get("response_hash") == row.get("response_hash")
+                and failure.get("observed_provider") == row.get("provider")
+                and failure.get("observed_model") == row.get("model")
+            ]
+            if (
+                len(matching_drift) != 1
+                or flow.get("status") != "failed_contract"
+                or flow.get("phase") != row.get("role")
+            ):
+                errors.append(f"{expected_arm}: usage model/provider drift at call {index}")
         provider_usage = row.get("usage")
         usage_keys = ("input", "cache_read", "cache_write", "output", "total")
         if not isinstance(provider_usage, dict) or any(
@@ -199,14 +395,18 @@ def _verify_run(
 
     simulator = VendingSimulator(scenario, int(manifest.get("seed", 0)))
     business_role = "actor" if expected_arm == "theatre" else "control"
-    protocol = manifest.get("protocol_version", "v1")
     expected_calls: list[tuple[int, str]] = []
     last_planner: dict[str, Any] | None = None
+    last_critic: dict[str, Any] | None = None
 
     def decision_at(turn_index: int, role: str) -> dict[str, Any] | None:
         candidates = [
             item for item in decisions
             if item.get("turn_index") == turn_index and item.get("role") == role
+            and (
+                protocol != "v3"
+                or item.get("response_hash") == accepted_v3.get((turn_index, role))
+            )
         ]
         if len(candidates) != 1:
             return None
@@ -229,6 +429,23 @@ def _verify_run(
             "critical_simulator_event": critical_event,
         }
 
+    def v3_schedule(turn_index: int, view: dict[str, Any], critic: dict[str, Any] | None = None) -> dict[str, Any]:
+        cadence = manifest["v3_cadence"]
+        critical_event = any(event.get("severity") == "critical" for event in view.get("recent_events", []))
+        strategic_due = turn_index % int(cadence["strategic_review_every_turns"]) == 0 or critical_event
+        consciousness_due = (
+            bool(cadence.get("consciousness_on_first_turn")) and turn_index == 0
+            or turn_index % int(cadence["consciousness_every_turns"]) == 0
+            or bool(cadence.get("consciousness_on_critical_verdict"))
+            and isinstance(critic, dict) and critic.get("verdict") == "critical"
+        )
+        return {
+            "turn_index": turn_index,
+            "strategic_review_due": strategic_due,
+            "consciousness_due": consciousness_due,
+            "critical_simulator_event": critical_event,
+        }
+
     for expected_index, turn in enumerate(turns):
         turn_index = turn.get("turn_index")
         if turn_index != expected_index:
@@ -236,31 +453,40 @@ def _verify_run(
             continue
         view = simulator.public_view()
         decision_audit = None
-        if protocol == "v2":
+        if protocol in ("v2", "v3"):
             if expected_arm == "control":
                 expected_calls.append((turn_index, "control"))
                 content = decision_at(turn_index, "control")
-                schedule = v2_schedule(turn_index, view)
+                schedule = v3_schedule(turn_index, view) if protocol == "v3" else v2_schedule(turn_index, view)
                 if content is None:
                     errors.append(f"{expected_arm}: turn {turn_index} has no unique control decision")
                     actions = []
                 else:
-                    try:
-                        actions = extract_actions("control", content)
-                    except ValueError as exc:
-                        errors.append(f"{expected_arm}: turn {turn_index} control contract failed: {exc}")
-                        actions = []
+                    if protocol == "v3":
+                        report = validate_v3_role_output("control", content)
+                        if report["status"] != "passed":
+                            errors.append(f"{expected_arm}: turn {turn_index} control contract failed: {'; '.join(report['errors'])}")
+                            actions = []
+                        else:
+                            actions = [item["action"] for item in content["execution_queue"]]
+                    else:
+                        try:
+                            actions = extract_v2_actions("control", content)
+                        except ValueError as exc:
+                            errors.append(f"{expected_arm}: turn {turn_index} control contract failed: {exc}")
+                            actions = []
                 decision_audit = {
-                    "schema_version": 1,
+                    "schema_version": 2 if protocol == "v3" else 1,
                     "status": "passed",
                     "arm": "control",
                     "schedule": schedule,
+                    **({"plan_timing": {item["id"]: item["timing"] for item in content["plan"]["action_queue"]}} if protocol == "v3" and isinstance(content, dict) else {}),
                     "action_count": len(actions),
                     "actions": actions,
                 }
             else:
                 critic = decision_at(turn_index, "critic")
-                schedule = v2_schedule(turn_index, view, critic)
+                schedule = v3_schedule(turn_index, view, critic) if protocol == "v3" else v2_schedule(turn_index, view, critic)
                 review = schedule["strategic_review_due"]
                 roles = ["critic"] if review else []
                 if review and schedule["consciousness_due"]:
@@ -270,28 +496,35 @@ def _verify_run(
                 roles.append("actor")
                 expected_calls.extend((turn_index, role) for role in roles)
                 if review:
+                    last_critic = critic
                     last_planner = decision_at(turn_index, "planner")
                 actor = decision_at(turn_index, "actor")
                 consciousness = decision_at(turn_index, "consciousness") if review else None
-                handoff = validate_theatre_handoff(
-                    critic,
-                    last_planner,
-                    actor,
-                    consciousness,
-                    review_required=review,
-                    consciousness_required=bool(review and schedule["consciousness_due"]),
-                )
+                if protocol == "v3":
+                    handoff = validate_v3_theatre_handoff(last_critic, last_planner, actor, consciousness)
+                else:
+                    handoff = validate_v2_theatre_handoff(
+                        critic,
+                        last_planner,
+                        actor,
+                        consciousness,
+                        review_required=review,
+                        consciousness_required=bool(review and schedule["consciousness_due"]),
+                    )
                 if handoff["status"] != "passed":
                     errors.append(f"{expected_arm}: turn {turn_index} handoff failed: {'; '.join(handoff['errors'])}")
                     actions = []
                 else:
-                    try:
-                        actions = extract_actions("actor", actor)
-                    except ValueError as exc:
-                        errors.append(f"{expected_arm}: turn {turn_index} actor contract failed: {exc}")
-                        actions = []
+                    if protocol == "v3":
+                        actions = [item["action"] for item in actor["execution_queue"]]
+                    else:
+                        try:
+                            actions = extract_v2_actions("actor", actor)
+                        except ValueError as exc:
+                            errors.append(f"{expected_arm}: turn {turn_index} actor contract failed: {exc}")
+                            actions = []
                 decision_audit = {
-                    "schema_version": 1,
+                    "schema_version": 2 if protocol == "v3" else 1,
                     "status": "passed",
                     "arm": "theatre",
                     "schedule": schedule,
@@ -315,7 +548,7 @@ def _verify_run(
 
         day_before = simulator.state["day"]
         applied = simulator.apply_turn(actions)
-        if protocol == "v2" and turn.get("decision_audit") != decision_audit:
+        if protocol in ("v2", "v3") and turn.get("decision_audit") != decision_audit:
             errors.append(f"{expected_arm}: turn {turn_index} decision audit mismatch")
         if turn.get("day_before") != day_before or turn.get("day_after") != simulator.state["day"]:
             errors.append(f"{expected_arm}: turn {turn_index} day boundary mismatch")
@@ -327,13 +560,13 @@ def _verify_run(
     current_turn = len(turns)
     current_expected: list[tuple[int, str]] = []
     if not simulator.state["terminated"]:
-        if protocol == "v2":
+        if protocol in ("v2", "v3"):
             view = simulator.public_view()
             if expected_arm == "control":
                 roles = ["control"]
             else:
                 critic = decision_at(current_turn, "critic")
-                schedule = v2_schedule(current_turn, view, critic)
+                schedule = v3_schedule(current_turn, view, critic) if protocol == "v3" else v2_schedule(current_turn, view, critic)
                 roles = ["critic"] if schedule["strategic_review_due"] else []
                 if schedule["strategic_review_due"] and schedule["consciousness_due"]:
                     roles.append("consciousness")
@@ -351,11 +584,17 @@ def _verify_run(
                 if review:
                     current_expected.extend(((current_turn, "critic"), (current_turn, "planner")))
             current_expected.append((current_turn, business_role))
+    cadence_source = [*decisions, *failures]
+    if protocol == "v3":
+        cadence_source = [*invocations, *failures]
+        if isinstance(flow.get("pending_invocation"), dict):
+            cadence_source.append({
+                "timestamp": flow.get("updated_at", ""),
+                "turn_index": flow["pending_invocation"].get("turn_index"),
+                "role": flow["pending_invocation"].get("role"),
+            })
     attempts = sorted(
-        [
-            *((item.get("timestamp", ""), index, item) for index, item in enumerate(decisions)),
-            *((item.get("timestamp", ""), len(decisions) + index, item) for index, item in enumerate(failures)),
-        ],
+        [(item.get("timestamp", ""), index, item) for index, item in enumerate(cadence_source)],
         key=lambda item: (item[0], item[1]),
     )
     cadence_attempts: list[dict[str, Any]] = []
@@ -389,6 +628,12 @@ def _verify_run(
         flow.get("phase") is not None or flow.get("pending") not in ({}, None)
     ):
         errors.append(f"{expected_arm}: prepare_turn flow contains a pending role phase")
+    if protocol == "v3":
+        if flow.get("current_step") == "model_roles" and flow.get("turn_state_hash") != stable_hash(state):
+            errors.append(f"{expected_arm}: v3 active turn state identity mismatch")
+        terminal_repairs = [row for row in invocations if row.get("outcome") == "failed_contract_after_repair"]
+        if terminal_repairs and flow.get("status") != "failed_contract":
+            errors.append(f"{expected_arm}: terminal repair evidence exists without failed_contract flow")
     if failures:
         if flow.get("status") != "failed_contract":
             errors.append(f"{expected_arm}: model failure exists without failed_contract flow")
@@ -471,6 +716,7 @@ def _verify_run(
             errors.append(f"{expected_arm}: final result economic score mismatch")
 
     total_tokens = usage_sum("total")
+    repair_rows = [row for row in usage if row.get("attempt_kind") == "repair"]
     return {
         "run_id": run_id,
         "arm": expected_arm,
@@ -478,6 +724,19 @@ def _verify_run(
         "turns": len(turns),
         "model_calls": len(usage),
         "model_failures": len(failures),
+        "first_pass_contract_failures": sum(
+            1 for row in invocations if row.get("original_validation_errors")
+        ) if protocol == "v3" else 0,
+        "successful_repairs": sum(
+            1 for row in invocations if row.get("outcome") == "accepted_repair"
+        ) if protocol == "v3" else 0,
+        "terminal_repair_failures": sum(
+            1 for row in invocations if row.get("outcome") == "failed_contract_after_repair"
+        ) if protocol == "v3" else 0,
+        "repair_calls": len(repair_rows) if protocol == "v3" else 0,
+        "repair_tokens": sum(
+            int(row.get("usage", {}).get("total", 0)) for row in repair_rows
+        ) if protocol == "v3" else 0,
         "provider_total_tokens": total_tokens,
         "output_tokens": output_tokens,
         "liquid_cash": expected_score["liquid_cash"],
@@ -519,15 +778,16 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             run_results[arm] = read_json(run_dir / "result.json")
 
     if set(manifests) == {"control", "theatre"}:
+        protocol = pair.get("protocol_version", "v1")
         parity_fields = ("seed", "model", "thinking", "scenario_hash", "decision_period_days")
-        if pair.get("protocol_version") == "v2":
+        if protocol in ("v2", "v3"):
             parity_fields += (
                 "protocol_version",
                 "artifact_hashes",
                 "shared_corpus_hash",
                 "protocol_hash",
                 "action_budget",
-                "v2_cadence",
+                f"{protocol}_cadence",
                 "usage_ledger_path",
                 "preregistration_sha256",
                 "source_commit",
@@ -535,6 +795,8 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
                 "inference_enabled",
                 "official",
             )
+            if protocol == "v3":
+                parity_fields += ("repair_policy",)
         for field in parity_fields:
             if manifests["control"].get(field) != manifests["theatre"].get(field):
                 errors.append(f"pair: manifest parity mismatch for {field}")
@@ -547,9 +809,9 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
         if manifests["control"].get("prompt_hashes") != manifests["theatre"].get("prompt_hashes"):
             errors.append("pair: prompt hash parity mismatch")
 
-        if pair.get("protocol_version") == "v2":
+        if protocol in ("v2", "v3"):
             try:
-                plan = seed_plan(int(pair.get("seed")))
+                plan = v3_seed_plan(int(pair.get("seed"))) if protocol == "v3" else v2_seed_plan(int(pair.get("seed")))
             except (TypeError, ValueError) as exc:
                 errors.append(f"pair: invalid preregistered seed: {exc}")
             else:
@@ -562,17 +824,18 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
 
             prereg_path = pair_dir / "preregistration.json"
             if not prereg_path.is_file():
-                errors.append("pair: missing frozen preregistration-v2.json")
+                errors.append(f"pair: missing frozen preregistration-{protocol}.json")
                 prereg_sha = None
             else:
                 prereg_sha = hashlib.sha256(prereg_path.read_bytes()).hexdigest()
                 if pair.get("preregistration_sha256") != prereg_sha:
                     errors.append("pair: frozen preregistration hash mismatch")
-                if prereg_sha != hashlib.sha256(PREREGISTRATION.read_bytes()).hexdigest():
+                published_prereg = V3_PREREGISTRATION if protocol == "v3" else V2_PREREGISTRATION
+                if prereg_sha != hashlib.sha256(published_prereg.read_bytes()).hexdigest():
                     errors.append("pair: frozen preregistration differs from published source")
-            live_audit = audit_preregistration()
+            live_audit = audit_v3_preregistration() if protocol == "v3" else audit_v2_preregistration()
             if live_audit["status"] != "passed":
-                errors.append("pair: published v2 preregistration audit failed")
+                errors.append(f"pair: published {protocol} preregistration audit failed")
             elif pair.get("artifact_hashes") != live_audit["observed_hashes"]:
                 errors.append("pair: frozen artifact hashes differ from published source")
             for arm in ("control", "theatre"):
@@ -590,7 +853,7 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             activation_path = pair_dir / "activation.json"
             if enabled:
                 if pair.get("official") is not True:
-                    errors.append("pair: activated v2 pair is not marked official")
+                    errors.append(f"pair: activated {protocol} pair is not marked official")
                 if not activation_path.is_file():
                     errors.append("pair: inference enabled without activation receipt")
                 else:
@@ -608,6 +871,8 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
                         errors.append("pair: activation artifact hashes mismatch")
                     if activation.get("official") is not True:
                         errors.append("pair: activation receipt is not marked official")
+                    if activation.get("protocol") != protocol:
+                        errors.append("pair: activation protocol mismatch")
                 for arm in ("control", "theatre"):
                     if manifests[arm].get("official") is not True:
                         errors.append(f"pair: activated {arm} manifest is not marked official")

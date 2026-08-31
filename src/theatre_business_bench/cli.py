@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, 
 from .simulator import VendingSimulator, stable_hash
 from .v2 import V2ContractError, activate_v2_pair, audit_preregistration
 from .v3 import audit_preregistration as audit_v3_preregistration
+from .v3 import V3ContractError, activate_v3_pair
 from .verify import verify_pair
 
 
@@ -108,14 +110,28 @@ def create_pair_cmd(args: argparse.Namespace) -> None:
 
 
 def pair_batch(args: argparse.Namespace) -> None:
-    integrity = verify_pair(Path(args.pair))
+    pair_dir = Path(args.pair)
+    integrity = verify_pair(pair_dir)
     if integrity["status"] != "passed":
         emit({"status": "integrity_failed", "verification": integrity})
         raise SystemExit(1)
+    pair = read_json(pair_dir / "pair.json")
+    if pair.get("official") is True and pair.get("inference_enabled") is True:
+        lock_fd = os.environ.get("THEATRE_OFFICIAL_LOCK_FD")
+        try:
+            if lock_fd is None:
+                raise ValueError("missing")
+            os.fstat(int(lock_fd))
+        except (ValueError, OSError):
+            emit({
+                "status": "lock_required",
+                "reason": "official inference must run through the canonical global-lock wrapper",
+            })
+            raise SystemExit(1)
     results = []
     calls = range(args.max_role_calls) if args.max_role_calls is not None else itertools.count()
     for _ in calls:
-        result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
+        result = step_pair(pair_dir, daily_token_budget=args.daily_token_budget)
         results.append(result)
         status_value = result.get("status") or result.get("pair_status")
         if status_value in ("completed", "paused_quota", "failed_contract", "blocked_preregistration"):
@@ -173,6 +189,15 @@ def activate_v2_cmd(args: argparse.Namespace) -> None:
     try:
         receipt = activate_v2_pair(Path(args.pair), args.source_commit)
     except V2ContractError as exc:
+        emit({"status": "activation_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit({"status": "activated", "pair_dir": str(Path(args.pair).resolve()), "receipt": receipt})
+
+
+def activate_v3_cmd(args: argparse.Namespace) -> None:
+    try:
+        receipt = activate_v3_pair(Path(args.pair), args.source_commit)
+    except V3ContractError as exc:
         emit({"status": "activation_failed", "error": str(exc)})
         raise SystemExit(1) from exc
     emit({"status": "activated", "pair_dir": str(Path(args.pair).resolve()), "receipt": receipt})
@@ -291,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     pair_create.add_argument("--model", default="openai/gpt-5.6-sol")
     pair_create.add_argument("--agent", default="business-bench")
     pair_create.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
-    pair_create.add_argument("--protocol", choices=("v1", "v2"), default="v1")
+    pair_create.add_argument("--protocol", choices=("v1", "v2", "v3"), default="v1")
     pair_create.add_argument("--run-root", help="store pair, runs, and provider ledger under this root")
     pair_create.set_defaults(func=create_pair_cmd)
 
@@ -335,6 +360,14 @@ def build_parser() -> argparse.ArgumentParser:
     v2_activate.add_argument("--pair", required=True)
     v2_activate.add_argument("--source-commit", required=True)
     v2_activate.set_defaults(func=activate_v2_cmd)
+
+    v3_activate = sub.add_parser(
+        "activate-v3-pair",
+        help="enable one untouched v3 pair from the exact clean source published at origin/main",
+    )
+    v3_activate.add_argument("--pair", required=True)
+    v3_activate.add_argument("--source-commit", required=True)
+    v3_activate.set_defaults(func=activate_v3_cmd)
 
     reconcile = sub.add_parser(
         "reconcile-openclaw-failures",

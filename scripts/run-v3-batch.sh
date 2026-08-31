@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-: "${THEATRE_PAIR_DIR:?set THEATRE_PAIR_DIR to one activated v2 pair}"
+: "${THEATRE_PAIR_DIR:?set THEATRE_PAIR_DIR to one activated v3 pair}"
 runtime_dir="${THEATRE_RUNTIME_DIR:-.runtime}"
 lock_file="$runtime_dir/official-inference.lock"
 
@@ -13,7 +13,6 @@ if ! flock -n 9; then
   exit 0
 fi
 
-# One lock is shared by every official seed. The Python runner serializes the
-# two arms inside a pair; this inherited descriptor prevents a second pair from
-# opening another provider call if the scheduler shell is interrupted.
+# The same lock serializes every official protocol and remains inherited by
+# the OpenClaw child, so a detached provider call never appears idle.
 PYTHONPATH=src python3 -m theatre_business_bench.cli pair-batch --pair "$THEATRE_PAIR_DIR" "$@"

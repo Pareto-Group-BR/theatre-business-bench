@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .v2 import ALLOWED_ACTIONS, RESPONSIBILITIES
+from .v2 import ALLOWED_ACTIONS, RESPONSIBILITIES, _published_source_identity
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -145,6 +145,110 @@ def audit_preregistration(path: Path = PREREGISTRATION) -> dict[str, Any]:
         "observed_hashes": observed_hashes,
         "errors": errors,
     }
+
+
+def seed_plan(seed: int) -> dict[str, Any]:
+    """Return the exact frozen execution plan for one registered v3 seed."""
+    audit = audit_preregistration()
+    if audit["status"] != "passed":
+        raise V3ContractError("v3 preregistration is invalid: " + "; ".join(audit["errors"]))
+    prereg = _read_json(PREREGISTRATION)
+    seeds = prereg["design"]["paired_seeds"]
+    if seed not in seeds:
+        raise V3ContractError(f"seed {seed} is not preregistered for v3")
+    design = prereg["design"]
+    raw_order = design["arm_order"][str(seed)]
+    return {
+        "seed": seed,
+        "first_arm": raw_order.removesuffix("_first"),
+        "days": design["days"],
+        "model": design["model"],
+        "thinking": design["thinking"],
+    }
+
+
+def activate_v3_pair(pair_dir: Path, source_commit: str) -> dict[str, Any]:
+    """Atomically bind an untouched offline v3 pair to published main."""
+    from .runner import atomic_json, read_json
+    from .verify import verify_pair
+
+    _published_source_identity(source_commit)
+    audit = audit_preregistration()
+    if audit["status"] != "passed":
+        raise V3ContractError("v3 preregistration is invalid: " + "; ".join(audit["errors"]))
+
+    pair_dir = pair_dir.resolve()
+    pair = read_json(pair_dir / "pair.json")
+    if pair.get("protocol_version") != "v3" or pair.get("status") != "ready":
+        raise V3ContractError("activation requires a ready v3 pair")
+    planned = seed_plan(int(pair.get("seed")))
+    if pair.get("first_arm") != planned["first_arm"] or pair.get("next_arm") != planned["first_arm"]:
+        raise V3ContractError("pair first arm differs from v3 preregistration")
+    if pair.get("inference_enabled"):
+        raise V3ContractError("pair is already activated")
+
+    prereg_snapshot = pair_dir / "preregistration.json"
+    if not prereg_snapshot.is_file():
+        raise V3ContractError("pair is missing its frozen v3 preregistration snapshot")
+    prereg_hash = _sha256(prereg_snapshot)
+    if prereg_hash != pair.get("preregistration_sha256") or prereg_hash != _sha256(PREREGISTRATION):
+        raise V3ContractError("pair preregistration snapshot differs from published v3 source")
+    if pair.get("artifact_hashes") != audit["observed_hashes"]:
+        raise V3ContractError("pair frozen artifact hashes differ from published v3 source")
+
+    integrity = verify_pair(pair_dir)
+    if integrity["status"] != "passed":
+        raise V3ContractError("pair integrity failed before activation: " + "; ".join(integrity["errors"]))
+
+    evidence_names = (
+        "usage.jsonl",
+        "model-decisions.jsonl",
+        "model-failures.jsonl",
+        "role-invocations.jsonl",
+        "call-journal.jsonl",
+        "turns.jsonl",
+        "result.json",
+    )
+    run_dirs: list[Path] = []
+    for arm in ("control", "theatre"):
+        run_dir = Path(pair[f"{arm}_run"])
+        run_dirs.append(run_dir)
+        for ledger_name in evidence_names:
+            if (run_dir / ledger_name).exists():
+                raise V3ContractError(f"activation refuses existing inference evidence: {arm}/{ledger_name}")
+        if read_json(run_dir / "state.json").get("day") != 0:
+            raise V3ContractError(f"activation refuses non-zero {arm} state")
+
+    receipt = {
+        "schema_version": 1,
+        "protocol": "v3",
+        "official": True,
+        "pair_id": pair["pair_id"],
+        "source_commit": source_commit,
+        "preregistration_sha256": prereg_hash,
+        "artifact_hashes": audit["observed_hashes"],
+        "seed": pair["seed"],
+        "first_arm": pair["first_arm"],
+    }
+    atomic_json(pair_dir / "activation.json", receipt)
+    receipt_hash = _sha256(pair_dir / "activation.json")
+    for run_dir in run_dirs:
+        manifest = read_json(run_dir / "manifest.json")
+        manifest.update({
+            "inference_enabled": True,
+            "official": True,
+            "source_commit": source_commit,
+            "activation_receipt_sha256": receipt_hash,
+        })
+        atomic_json(run_dir / "manifest.json", manifest)
+    pair.update({
+        "inference_enabled": True,
+        "official": True,
+        "source_commit": source_commit,
+        "activation_receipt_sha256": receipt_hash,
+    })
+    atomic_json(pair_dir / "pair.json", pair)
+    return receipt
 
 
 def _object(value: Any, label: str, errors: list[str]) -> dict[str, Any]:
@@ -285,6 +389,42 @@ def _confront_plan_execution(
     return {"plan_items": sorted(items), "executed_plan_items": sorted(executed), "conditional_plan_items": sorted(ack)}
 
 
+def validate_planner_handoff(critic: Any, planner: Any) -> dict[str, Any]:
+    """Validate the Critic→Planner boundary before an Actor call can consume it."""
+    errors: list[str] = []
+    for role, value in (("critic", critic), ("planner", planner)):
+        report = validate_role_output(role, value)
+        errors.extend(f"{role}: {item}" for item in report["errors"])
+    if errors:
+        return {"status": "failed", "errors": errors}
+    correction = critic["correction"]
+    items = _plan_items(planner.get("action_queue"), "theatre.plan.action_queue", errors)
+    immediate, conditional = _binding(
+        planner.get("correction_binding"), "theatre.plan.correction_binding", errors
+    )
+    if correction.get("required") is True:
+        binding = planner.get("correction_binding", {})
+        if isinstance(binding, dict) and binding.get("correction_id") != correction.get("id"):
+            errors.append("theatre.critical correction id is not bound")
+        bound = immediate | conditional
+        if not bound or not bound.issubset(items):
+            errors.append("theatre.critical correction must bind known plan items")
+        if any(items.get(item_id, {}).get("timing") != "now" for item_id in immediate):
+            errors.append("theatre.immediate correction ids must be timing=now")
+        if any(items.get(item_id, {}).get("timing") != "conditional_future" for item_id in conditional):
+            errors.append("theatre.conditional correction ids must be timing=conditional_future")
+        covered = {items[item_id]["action_type"] for item_id in bound if item_id in items}
+        if not set(correction.get("required_action_types", [])).issubset(covered):
+            errors.append("theatre.plan omits a required correction action type")
+    return {
+        "status": "passed" if not errors else "failed",
+        "plan_items": sorted(items),
+        "immediate_plan_items": sorted(immediate),
+        "conditional_plan_items": sorted(conditional),
+        "errors": errors,
+    }
+
+
 def validate_role_output(role: str, value: Any) -> dict[str, Any]:
     errors: list[str] = []
     if role not in ROLES:
@@ -338,6 +478,16 @@ def validate_theatre_handoff(critic: Any, planner: Any, actor: Any, consciousnes
         return {"status": "failed", "errors": errors}
     detail = _confront_plan_execution(critic["correction"], planner, actor, "theatre.", errors)
     return {"status": "passed" if not errors else "failed", **detail, "errors": errors}
+
+
+def extract_actions(role: str, value: Any) -> list[dict[str, Any]]:
+    """Return only simulator actions that passed the frozen v3 role contract."""
+    report = validate_role_output(role, value)
+    if report["status"] != "passed":
+        raise V3ContractError(f"{role}: " + "; ".join(report["errors"]))
+    if role not in ("control", "actor"):
+        return []
+    return [item["action"] for item in value["execution_queue"]]
 
 
 def validate_repair_envelope(envelope: Any, *, role: str, turn_index: int, state_hash: str) -> dict[str, Any]:
