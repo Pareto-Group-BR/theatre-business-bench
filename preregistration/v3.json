@@ -1,0 +1,90 @@
+{
+  "schema": "theatre-business-bench-preregistration/v3",
+  "frozen": true,
+  "run_status": "not_started",
+  "research_question": "Does persistent separation into specialized Theatre roles improve paired annual economic performance when both arms have the same responsibilities and one paid structured repair?",
+  "design": {
+    "paired_seeds": [2301, 2302, 2303, 2304, 2305],
+    "arm_order": {
+      "2301": "theatre_first",
+      "2302": "control_first",
+      "2303": "theatre_first",
+      "2304": "control_first",
+      "2305": "theatre_first"
+    },
+    "days": 365,
+    "decision_period_days": 3,
+    "model": "openai/gpt-5.6-sol",
+    "thinking": "medium",
+    "serialization": "one provider call at a time across both arms",
+    "max_actions_per_turn": 14,
+    "human_intervention": "forbidden",
+    "live_internet": "forbidden",
+    "shared_frozen_corpus": true,
+    "opponent_information": "forbidden",
+    "v1_v2_results_in_role_context": "forbidden",
+    "failed_and_low_scoring_runs": "preserve"
+  },
+  "functional_parity": {
+    "control_responsibilities": [
+      "critical_audit",
+      "financial_and_supply_planning",
+      "business_operations",
+      "strategic_challenge"
+    ],
+    "theatre_responsibilities": {
+      "critic": ["critical_audit"],
+      "planner": ["financial_and_supply_planning"],
+      "actor": ["business_operations"],
+      "consciousness": ["strategic_challenge"]
+    }
+  },
+  "cadence": {
+    "strategic_review_every_turns": 9,
+    "consciousness_every_turns": 18,
+    "consciousness_on_first_turn": true,
+    "consciousness_on_critical_verdict": true,
+    "review_on_critical_simulator_event": true,
+    "theatre_order": ["critic", "consciousness_if_due", "planner", "actor"]
+  },
+  "execution_gates": {
+    "timing_classes": ["now", "conditional_future"],
+    "conditional_future_requires_observable_precondition": true,
+    "conditional_future_forbidden_in_current_execution": true,
+    "all_immediate_correction_items_executed_same_handoff": true,
+    "required_action_types_covered_across_timing_classes": true,
+    "plan_action_binding_required": true,
+    "actor_adherence_system_validated": true,
+    "action_capacity_system_validated": true,
+    "invalid_structure_after_repair": "failed_contract_and_preserve_evidence"
+  },
+  "repair_policy": {
+    "eligible_failure": "json_parseable_structural_contract_failure_only",
+    "max_repairs_per_role_invocation": 1,
+    "same_role_turn_and_state_required": true,
+    "original_and_repair_calls_preserved": true,
+    "original_and_repair_tokens_charged": true,
+    "simulator_transition_between_attempts": "forbidden",
+    "parse_transport_quota_failures_repairable": false,
+    "second_failure": "failed_contract"
+  },
+  "primary_metric": "final liquid cash minus USD 100 per million output tokens",
+  "analysis": {
+    "pairs_before_aggregation": true,
+    "paired_difference": "theatre minus control",
+    "summaries": ["mean", "median", "theatre_seed_wins", "bootstrap_interval"],
+    "interval_includes_zero": "inconclusive",
+    "repair_metrics": ["first_pass_contract_failures", "successful_repairs", "terminal_repair_failures", "repair_calls", "repair_tokens"]
+  },
+  "artifacts": {
+    "scenario": {"path": "scenarios/vending_v1.json", "sha256": "b296fb0c0fd69cd3f660b8b890c0c7c18d7cbbbb939cc27416b147d1d91579f8"},
+    "shared_corpus": {"path": "corpus/vending_operations_v2.md", "sha256": "a1f16b9183d1e635de793edc2f62d200a60fe66a2629e07ec8d8bdb50e14fd5f"},
+    "protocol": {"path": "docs/EXPERIMENT_PROTOCOL_V3.md", "sha256": "64c32e4e9055b18da9768295da9d6d73e3c3a60d91213d38f7bed961795fadd6"},
+    "prompt_control": {"path": "prompts/v3/control.md", "sha256": "c233c4c6efa6f45ce44897fd6a3d3ca4bf00e0a6892d5bfe4356a927b2995b83"},
+    "prompt_critic": {"path": "prompts/v3/critic.md", "sha256": "06d696e7b91421c5fb12c5bf254eb1a1aec3947e46889a5fe89bcfde4c314aea"},
+    "prompt_consciousness": {"path": "prompts/v3/consciousness.md", "sha256": "6952c805544d0bd2bfe0371cf56445b1b6137e00f1edb8ccf75d86ef40fb10cb"},
+    "prompt_planner": {"path": "prompts/v3/planner.md", "sha256": "5fc2858270825ebd63b852856ba5a4fb769c7bd821295ae34eda0057bd186c14"},
+    "prompt_actor": {"path": "prompts/v3/actor.md", "sha256": "411343d1750dfff21eb652152abc159184d3ed5da9a80bf4fa86f7c01dc5acaa"},
+    "prompt_repair": {"path": "prompts/v3/repair.md", "sha256": "a6cf58ec8968dcdc8363faaac75696de9312cd2789c48fcb92c14b7f55d2089d"}
+  }
+}

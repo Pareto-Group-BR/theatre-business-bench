@@ -19,6 +19,7 @@ from .report import (
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 from .v2 import V2ContractError, activate_v2_pair, audit_preregistration
+from .v3 import audit_preregistration as audit_v3_preregistration
 from .verify import verify_pair
 
 
@@ -151,6 +152,17 @@ def audit_v2_cmd(args: argparse.Namespace) -> None:
         audit_preregistration(Path(args.preregistration))
         if args.preregistration
         else audit_preregistration()
+    )
+    emit(result)
+    if result["status"] != "passed":
+        raise SystemExit(1)
+
+
+def audit_v3_cmd(args: argparse.Namespace) -> None:
+    result = (
+        audit_v3_preregistration(Path(args.preregistration))
+        if args.preregistration
+        else audit_v3_preregistration()
     )
     emit(result)
     if result["status"] != "passed":
@@ -308,6 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     v2_audit.add_argument("--preregistration", help="override preregistration/v2.json for audit testing")
     v2_audit.set_defaults(func=audit_v2_cmd)
+
+    v3_audit = sub.add_parser(
+        "audit-v3-preregistration",
+        help="verify frozen v3 parity, timing classes, bounded repair, seeds, and artifact hashes",
+    )
+    v3_audit.add_argument("--preregistration", help="override preregistration/v3.json for audit testing")
+    v3_audit.set_defaults(func=audit_v3_cmd)
 
     v2_activate = sub.add_parser(
         "activate-v2-pair",

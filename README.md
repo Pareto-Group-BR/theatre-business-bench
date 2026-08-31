@@ -104,6 +104,37 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli render-v2-campaign \
   --html-out /tmp/v2-terminal-campaign.html
 ```
 
+## Prospective v3 pre-registration
+
+V3 is a new, inference-free pre-registration motivated by the terminal v2
+evidence. It never resumes or edits seeds 2201–2205. Five new seeds 2301–2305
+freeze the same model, world, score, responsibilities, cadence, 14-action
+limit, and arm information. The prospective contract adds two symmetric
+mechanisms:
+
+- plan items are classified as executable `now` or
+  `conditional_future` with an observable precondition; all immediate critical
+  work must execute in the current handoff, while future-dependent work is
+  acknowledged and forbidden from early execution;
+- each role invocation may receive exactly one paid, preserved structured
+  repair after JSON-parseable contract failure. Parse/transport/quota failures
+  and a second structural failure remain terminal.
+
+The pre-registration and deterministic contract gates are implemented and
+auditable without model execution:
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v3-preregistration
+python3 -m unittest tests.test_v3 -v
+```
+
+State: `PREREGISTERED_TECHNICALLY / NO_INFERENCE`. V3 pair creation,
+activation, repair recording, replay, and the official runner are intentionally
+not enabled by this pre-registration package; enabling inference requires a
+separate reviewed executor change that consumes these exact frozen bytes.
+See [`docs/EXPERIMENT_PROTOCOL_V3.md`](docs/EXPERIMENT_PROTOCOL_V3.md) and
+[`preregistration/v3.json`](preregistration/v3.json).
+
 The frozen design gave the single-agent control and Theatre the same four
 functional responsibilities, frozen evidence, and visible 14-action contract;
 only cognitive organization differed. Theatre routed Crítico → optional

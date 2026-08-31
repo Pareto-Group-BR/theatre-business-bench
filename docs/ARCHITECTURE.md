@@ -55,6 +55,23 @@ deterministic `decision_audit`; the verifier reconstructs cadence, handoffs,
 actions, state, activation, frozen artifact hashes, and provider-ledger parity
 without invoking a model.
 
+### Prospective v3 contract boundary
+
+V3 remains offline and inference-disabled at this stage. Its frozen contract
+separates plan items into `now` and `conditional_future`. Immediate critical
+items must execute in the same handoff; future items require an observable
+precondition, are acknowledged by exact id, and are rejected if submitted
+early. The same pure gate validates the combined control response and the
+Theatre Roteirista→Personagem handoff.
+
+V3 also freezes one structured repair per role invocation. The repair keeps
+role, turn, and state identity, receives deterministic validation errors, and
+must return a complete valid replacement. Both attempts are chargeable
+evidence and no simulator transition may occur between them. The current
+package implements the pre-registration audit and pure gates only; pair
+activation and runner/replay support stay disabled until a reviewed executor
+persists both attempts and proves those invariants end to end.
+
 ## Subscription transport
 
 The runner invokes `openclaw agent` through the Gateway with:
