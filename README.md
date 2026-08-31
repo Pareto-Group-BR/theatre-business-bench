@@ -79,6 +79,31 @@ not the official five-seed benchmark verdict.
 An official result still requires the frozen manifest, five pre-registered
 paired seeds, full logs, replay verification, and the planned paired analysis.
 
+## Autonomous Theatre v2
+
+The next experiment is prepared separately under improvement #7. It compares
+one general manager with all four responsibilities against Crítico,
+Roteirista CFO/controller/supply planner, autonomous Consciência and operational
+Personagem. Both arms receive the same state, frozen knowledge, model, tools,
+business budget, action authority and explicit 14-action limit. Internet is
+disabled.
+
+Critical feedback is no longer a narrative label: correction IDs must enter an
+executable action queue and reach execution or a state-grounded blockage. The
+same deterministic contract audits the control's four-part response. Five new
+seeds and every artifact hash are pre-registered before inference.
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli verify-v2-preregistration
+PYTHONPATH=src python3 -m theatre_business_bench.cli create-pair \
+  --protocol v2 --seed 2101 --run-root "$(mktemp -d)"
+```
+
+The created pair is intentionally offline-only and refuses model calls until a
+clean published source commit is explicitly activated. See
+[`docs/EXPERIMENT_PROTOCOL_V2.md`](docs/EXPERIMENT_PROTOCOL_V2.md). No v2
+economic result exists yet.
+
 Sources:
 
 - https://andonlabs.com/evals/vending-bench-2

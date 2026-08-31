@@ -29,6 +29,27 @@ One persistent GPT-5.6 Sol session receives the state and combines diagnosis, pl
 
 The Personagem runs at every three-day decision boundary. Crítico and Roteirista run at the start, every four simulated weeks, and after critical events.
 
+### Autonomous v2 profile
+
+V2 is isolated from v1 by a separate scenario, five prompts, functional
+contract, corpus and pre-registration. Both arms perform the same four
+functions at every decision. Control returns those functions as four sections
+in one persistent-session response; Theatre routes the same shared evidence
+through persistent Crítico, Roteirista, Consciência and Personagem sessions.
+
+`v2.audit_v2_bundle` is the common authority boundary. It requires every
+critical correction to map to a simulator-action queue, every correction to be
+reviewed by Consciência and every required queue item to be executed or blocked
+by an exact public-state value plus a matching zero-day simulator rejection. It compiles the only action list passed to the
+simulator and is persisted as `turns.jsonl[].decision_audit`. The verifier
+reconstructs this audit from immutable model decisions before replaying actions.
+
+V2 pairs are born with inference disabled. `activate-v2-pair` accepts only an
+exact clean source commit whose frozen SHA-256 values match the checked-in
+pre-registration and refuses any existing inference evidence. Direct `step`
+also checks the activation receipt, so editing one boolean is insufficient to
+bypass the gate.
+
 ## Subscription transport
 
 The runner invokes `openclaw agent` through the Gateway with:

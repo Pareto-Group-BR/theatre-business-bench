@@ -1,0 +1,31 @@
+{
+  "id": "vending-v2",
+  "version": 2,
+  "currency": "USD",
+  "days": 365,
+  "decision_period_days": 3,
+  "starting_cash": 500.0,
+  "daily_machine_fee": 2.0,
+  "bankruptcy_grace_days": 10,
+  "machine_capacity_units": 72,
+  "storage_capacity_units": 420,
+  "max_actions_per_turn": 14,
+  "expose_action_budget": true,
+  "virtual_output_cost_per_million_tokens": 100.0,
+  "products": [
+    {"sku":"water","name":"Spring Water 500ml","size":1,"reference_price":1.75,"base_daily_demand":5.8,"elasticity":1.25,"weather":"hot"},
+    {"sku":"cola","name":"Cola 355ml","size":1,"reference_price":2.25,"base_daily_demand":5.2,"elasticity":1.45,"weather":"hot"},
+    {"sku":"energy","name":"Energy Drink 250ml","size":1,"reference_price":3.5,"base_daily_demand":2.8,"elasticity":1.05,"weather":"neutral"},
+    {"sku":"chips","name":"Potato Chips","size":1,"reference_price":2.0,"base_daily_demand":4.4,"elasticity":1.35,"weather":"neutral"},
+    {"sku":"protein","name":"Protein Bar","size":1,"reference_price":3.25,"base_daily_demand":2.1,"elasticity":0.9,"weather":"neutral"},
+    {"sku":"candy","name":"Chocolate Candy","size":1,"reference_price":1.75,"base_daily_demand":3.8,"elasticity":1.55,"weather":"cold"},
+    {"sku":"trailmix","name":"Premium Trail Mix","size":2,"reference_price":4.75,"base_daily_demand":1.45,"elasticity":0.72,"weather":"neutral"},
+    {"sku":"charger","name":"USB-C Emergency Cable","size":2,"reference_price":12.0,"base_daily_demand":0.34,"elasticity":0.55,"weather":"neutral"}
+  ],
+  "suppliers": [
+    {"id":"metro","name":"Metro Wholesale","reliability":0.95,"lead_days":3,"floor_multiplier":0.78,"markup":1.08,"min_order":12,"adversarial":0.02,"catalog":["water","cola","chips","candy"]},
+    {"id":"value","name":"ValueVend Distribution","reliability":0.84,"lead_days":4,"floor_multiplier":0.7,"markup":0.98,"min_order":24,"adversarial":0.12,"catalog":["water","cola","energy","chips","protein","candy"]},
+    {"id":"prime","name":"Prime Convenience Supply","reliability":0.91,"lead_days":5,"floor_multiplier":0.74,"markup":1.02,"min_order":10,"adversarial":0.05,"catalog":["energy","protein","trailmix","charger"]},
+    {"id":"rocket","name":"Rocket Deals LLC","reliability":0.68,"lead_days":2,"floor_multiplier":0.58,"markup":0.86,"min_order":36,"adversarial":0.38,"catalog":["water","cola","energy","chips","candy","trailmix","charger"]}
+  ]
+}

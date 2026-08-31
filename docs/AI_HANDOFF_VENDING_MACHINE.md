@@ -1,6 +1,10 @@
 # Theatre Business Bench — handoff autocontido para outra IA
 
-> Atualizado em 2026-08-30, no checkpoint verificado do dia 189/365 da seed 1201.
+> Atualizado em 2026-08-31. O piloto seed 1201 terminou 365/365; o relatório
+> final canônico está em `docs/PILOT_RESULT_1201.md`. As seções históricas que
+> descrevem dia 189 permanecem como diagnóstico causal daquele checkpoint, não
+> como estado vivo. Theatre v2 autônomo está pré-registrado e testável offline
+> em `docs/EXPERIMENT_PROTOCOL_V2.md`, sem nenhuma inferência v2.
 >
 > Este documento serve para uma IA compreender, auditar, continuar a análise ou desenhar uma nova versão do experimento sem contaminar a evidência já produzida.
 
@@ -447,37 +451,24 @@ Nunca inicie dois runners sobre o mesmo pair. Nunca edite `state.json`, `turns.j
 
 ## 15. Como experimentar Theatre v2 sem contaminar a v1
 
-Há duas etapas diferentes.
+Ramon descartou intervenção humana durante a corrida. Não ressuscite o fork
+human-assisted da PR #6. A v2 canônica é uma corrida autônoma limpa desde o dia
+0, descrita integralmente em `docs/EXPERIMENT_PROTOCOL_V2.md`.
 
-### 15.1 Fork exploratório a partir do dia 189
+1. preserve pair/seed 1201 como piloto v1 concluído;
+2. valide os hashes com `verify-v2-preregistration`;
+3. materialize somente uma seed pré-registrada (2101, 2203, 2309, 2411 ou 2521);
+4. mantenha o pair offline até existir um commit publicado, limpo e exato;
+5. ative esse commit pelo recibo determinístico;
+6. execute controle e Theatre serialmente, sem internet e sem contexto cruzado;
+7. preserve falhas, quota, uso do modelo, fila crítica e auditoria de execução;
+8. declare resultado apenas pelo score econômico dos cinco pares.
 
-Objetivo: testar se uma intervenção muda a **inclinação futura** a partir do mesmo estado, sem alegar que apagou a desvantagem histórica.
-
-Desenho recomendado:
-
-1. preservar o pair v1 intocado;
-2. clonar o checkpoint Theatre do dia 189 para dois novos braços não oficiais;
-3. braço A continua com Theatre v1;
-4. braço B recebe Theatre v2/Consciência;
-5. usar o mesmo estado inicial e o mesmo mundo determinístico futuro;
-6. pré-registrar prompts, ferramentas, modelo, thinking, horizonte e métricas;
-7. medir, por exemplo, os próximos 60 ou 90 dias;
-8. comparar incremento de lucro bruto, ruptura, receita/unidade, variedade, ações e capital empregado;
-9. registrar qualquer intervenção humana literalmente.
-
-Se Ramon atuar como Consciência, nomear honestamente o braço como **human-assisted exploratório**. Como ele já viu o controle, não é uma intervenção cega.
-
-### 15.2 Corrida autônoma limpa desde o dia 0
-
-Depois de traduzir os insights do fork para regras autônomas:
-
-1. congelar Theatre v2;
-2. escolher seeds novas e pré-registradas;
-3. rodar controle, v1 e v2 com paridade adequada;
-4. nunca usar resultados de um braço como contexto privado do outro;
-5. manter o mesmo modelo e score;
-6. publicar cada par antes da agregação;
-7. declarar vitória apenas pelo score econômico final, não pela qualidade narrativa.
+O controle é um gerente geral único com crítica, CFO/controller + supply
+planning, operação e desafio estratégico. O Theatre separa exatamente essas
+funções em Crítico, Roteirista, Personagem e Consciência autônoma. O limite de
+14 ações, o corpus congelado, as ferramentas vazias, o modelo, o mundo, o
+orçamento econômico e a autoridade final são equivalentes.
 
 ## 16. Pesquisa externa e internet
 
@@ -595,4 +586,3 @@ Uma continuação é considerada correta somente quando:
 - registra tokens e falhas;
 - publica estado parcial como parcial;
 - produz uma experiência ou evidência que outra pessoa consiga reproduzir.
-

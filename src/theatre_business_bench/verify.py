@@ -5,8 +5,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .runner import PROMPT_FILES, read_json
+from .runner import PROMPT_FILES, V2_PROMPT_FILES, read_json
 from .simulator import VendingSimulator, stable_hash
+from .v2 import V2ContractError, audit_v2_bundle, build_v2_bundle, file_sha256
 
 
 def _canonical(value: Any) -> str:
@@ -61,13 +62,26 @@ def _verify_run(
     if stable_hash(scenario) != manifest.get("scenario_hash"):
         errors.append(f"{expected_arm}: scenario hash mismatch")
 
+    protocol = manifest.get("protocol_version", "v1")
+    prompt_files = V2_PROMPT_FILES if protocol == "v2" else PROMPT_FILES
     prompt_hashes = manifest.get("prompt_hashes", {})
-    for role in PROMPT_FILES:
+    for role in prompt_files:
         snapshot = run_dir / f"prompt-{role}.md"
         if not snapshot.is_file():
             errors.append(f"{expected_arm}: missing frozen prompt for {role}")
         elif stable_hash(snapshot.read_text(encoding="utf-8")) != prompt_hashes.get(role):
             errors.append(f"{expected_arm}: frozen prompt hash mismatch for {role}")
+    if protocol == "v2":
+        contract_path = run_dir / "functional-contract.json"
+        knowledge_path = run_dir / "knowledge.md"
+        if not contract_path.is_file() or stable_hash(read_json(contract_path)) != manifest.get("functional_contract_hash"):
+            errors.append(f"{expected_arm}: frozen functional contract hash mismatch")
+        if not knowledge_path.is_file() or stable_hash(knowledge_path.read_text(encoding="utf-8")) != manifest.get("knowledge_hash"):
+            errors.append(f"{expected_arm}: frozen knowledge hash mismatch")
+        if manifest.get("action_budget") != scenario.get("max_actions_per_turn"):
+            errors.append(f"{expected_arm}: explicit action budget differs from scenario")
+        if not scenario.get("expose_action_budget"):
+            errors.append(f"{expected_arm}: v2 scenario does not expose the action budget")
 
     usage = _read_jsonl(run_dir / "usage.jsonl", errors)
     decisions = _read_jsonl(run_dir / "model-decisions.jsonl", errors)
@@ -119,14 +133,16 @@ def _verify_run(
         if turn_index != expected_index:
             errors.append(f"{expected_arm}: non-contiguous turn index at {expected_index}")
             continue
+        view = simulator.public_view()
         if expected_arm == "theatre":
-            view = simulator.public_view()
-            review = (
+            review = protocol == "v2" or (
                 turn_index % int(manifest.get("theatre_review_every_turns", 1)) == 0
                 or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
             )
             if review:
                 expected_calls.extend(((turn_index, "critic"), (turn_index, "planner")))
+                if protocol == "v2":
+                    expected_calls.append((turn_index, "consciousness"))
         expected_calls.append((turn_index, business_role))
         candidates = [
             item for item in decisions
@@ -136,9 +152,28 @@ def _verify_run(
             errors.append(f"{expected_arm}: turn {turn_index} has {len(candidates)} business decisions")
             continue
         content = candidates[0].get("content")
-        actions = content.get("actions", []) if isinstance(content, dict) else []
-        if not isinstance(actions, list):
-            actions = []
+        if protocol == "v2" and isinstance(content, dict):
+            turn_decisions = {
+                item.get("role"): item.get("content")
+                for item in decisions
+                if item.get("turn_index") == turn_index
+            }
+            pending = {
+                role: turn_decisions.get(role)
+                for role in ("critic", "planner", "consciousness")
+            }
+            try:
+                audit = audit_v2_bundle(build_v2_bundle(expected_arm, content, pending), view, simulator)
+                actions = audit["actions"]
+                if turn.get("decision_audit") != audit:
+                    errors.append(f"{expected_arm}: turn {turn_index} decision audit mismatch")
+            except V2ContractError as exc:
+                errors.append(f"{expected_arm}: turn {turn_index} v2 contract failure: {exc}")
+                actions = []
+        else:
+            actions = content.get("actions", []) if isinstance(content, dict) else []
+            if not isinstance(actions, list):
+                actions = []
         day_before = simulator.state["day"]
         applied = simulator.apply_turn(actions)
         if turn.get("day_before") != day_before or turn.get("day_after") != simulator.state["day"]:
@@ -153,12 +188,14 @@ def _verify_run(
     if not simulator.state["terminated"]:
         if expected_arm == "theatre":
             view = simulator.public_view()
-            review = (
+            review = protocol == "v2" or (
                 current_turn % int(manifest.get("theatre_review_every_turns", 1)) == 0
                 or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
             )
             if review:
                 current_expected.extend(((current_turn, "critic"), (current_turn, "planner")))
+                if protocol == "v2":
+                    current_expected.append((current_turn, "consciousness"))
         current_expected.append((current_turn, business_role))
     actual_calls = [(item.get("turn_index"), item.get("role")) for item in decisions]
     if actual_calls[:len(expected_calls)] != expected_calls:
@@ -243,7 +280,11 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             run_results[arm] = read_json(run_dir / "result.json")
 
     if set(manifests) == {"control", "theatre"}:
-        for field in ("seed", "model", "thinking", "scenario_hash", "decision_period_days"):
+        for field in (
+            "seed", "model", "thinking", "scenario_hash", "decision_period_days",
+            "protocol_version", "functional_contract_hash", "knowledge_hash",
+            "shared_functions", "action_budget", "usage_ledger_path",
+        ):
             if manifests["control"].get(field) != manifests["theatre"].get(field):
                 errors.append(f"pair: manifest parity mismatch for {field}")
         if pair.get("seed") != manifests["control"].get("seed"):
@@ -254,6 +295,36 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             errors.append("pair: thinking differs from run manifests")
         if manifests["control"].get("prompt_hashes") != manifests["theatre"].get("prompt_hashes"):
             errors.append("pair: prompt hash parity mismatch")
+        if pair.get("protocol_version", "v1") != manifests["control"].get("protocol_version", "v1"):
+            errors.append("pair: protocol differs from run manifests")
+        if pair.get("protocol_version") == "v2":
+            prereg_path = pair_dir / "preregistration.json"
+            prereg: dict[str, Any] = {}
+            if not prereg_path.is_file():
+                errors.append("pair: frozen v2 preregistration snapshot is missing")
+            else:
+                prereg = read_json(prereg_path)
+                if file_sha256(prereg_path) != pair.get("preregistration_sha256"):
+                    errors.append("pair: frozen v2 preregistration hash mismatch")
+                matching = [
+                    row for row in prereg.get("paired_seeds", [])
+                    if isinstance(row, dict) and row.get("seed") == pair.get("seed")
+                ]
+                if len(matching) != 1 or matching[0].get("first_arm") != pair.get("first_arm"):
+                    errors.append("pair: seed is not uniquely present in frozen preregistration")
+            if pair.get("inference_enabled"):
+                activation = pair_dir / "activation.json"
+                if not activation.is_file():
+                    errors.append("pair: activated v2 pair is missing activation.json")
+                elif read_json(activation).get("preregistration_sha256") != pair.get("preregistration_sha256"):
+                    errors.append("pair: activation preregistration hash mismatch")
+            for arm in ("control", "theatre"):
+                manifest = manifests[arm]
+                if bool(manifest.get("inference_enabled")) != bool(pair.get("inference_enabled")):
+                    errors.append(f"pair: {arm} inference gate differs from pair")
+                for field in ("source_commit", "preregistration_sha256", "activation_receipt_sha256"):
+                    if manifest.get(field) != pair.get(field):
+                        errors.append(f"pair: {arm} activation field mismatch for {field}")
     if set(scenarios) == {"control", "theatre"}:
         if scenarios["control"] != scenarios["theatre"]:
             errors.append("pair: scenario snapshots differ")

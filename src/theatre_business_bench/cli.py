@@ -17,6 +17,7 @@ from .report import (
 from .runner import DEFAULT_SCENARIO, ROOT, create_pair, create_run, read_json, step_pair, step_run
 from .simulator import VendingSimulator, stable_hash
 from .verify import verify_pair
+from .v2 import V2ContractError, activate_v2_pair, verify_v2_preregistration
 
 
 def emit(value: Any) -> None:
@@ -59,6 +60,8 @@ def create(args: argparse.Namespace) -> None:
         model=args.model,
         agent_id=args.agent,
         thinking=args.thinking,
+        protocol=args.protocol,
+        run_root=Path(args.run_root) if args.run_root else None,
     )
     emit({"status": "created", "run_dir": str(path), "manifest": read_json(path / "manifest.json")})
 
@@ -73,7 +76,7 @@ def batch(args: argparse.Namespace) -> None:
     for _ in calls:
         result = step_run(Path(args.run), daily_token_budget=args.daily_token_budget)
         results.append(result)
-        if result["status"] in ("completed", "paused_quota"):
+        if result["status"] in ("completed", "paused_quota", "failed_contract", "blocked_preregistration"):
             break
     emit({"calls_attempted": len(results), "last": results[-1], "history": results})
 
@@ -91,7 +94,19 @@ def status(args: argparse.Namespace) -> None:
 
 
 def create_pair_cmd(args: argparse.Namespace) -> None:
-    path = create_pair(args.seed, args.days, args.model, args.agent, args.thinking)
+    try:
+        path = create_pair(
+            args.seed,
+            args.days,
+            args.model,
+            args.agent,
+            args.thinking,
+            run_root=Path(args.run_root) if args.run_root else None,
+            protocol=args.protocol,
+        )
+    except V2ContractError as exc:
+        emit({"status": "v2_creation_refused", "error": str(exc)})
+        raise SystemExit(1) from exc
     emit({"status": "created", "pair_dir": str(path), "pair": read_json(path / "pair.json")})
 
 
@@ -106,7 +121,7 @@ def pair_batch(args: argparse.Namespace) -> None:
         result = step_pair(Path(args.pair), daily_token_budget=args.daily_token_budget)
         results.append(result)
         status_value = result.get("status") or result.get("pair_status")
-        if status_value in ("completed", "paused_quota"):
+        if status_value in ("completed", "paused_quota", "failed_contract", "blocked_preregistration"):
             break
     emit({"calls_attempted": len(results), "last": results[-1], "history": results})
 
@@ -133,6 +148,22 @@ def verify_pair_cmd(args: argparse.Namespace) -> None:
     emit(result)
     if result["status"] != "passed":
         raise SystemExit(1)
+
+
+def verify_v2_preregistration_cmd(args: argparse.Namespace) -> None:
+    result = verify_v2_preregistration()
+    emit(result)
+    if result["status"] != "passed":
+        raise SystemExit(1)
+
+
+def activate_v2_pair_cmd(args: argparse.Namespace) -> None:
+    try:
+        receipt = activate_v2_pair(Path(args.pair), args.source_commit)
+    except V2ContractError as exc:
+        emit({"status": "v2_activation_refused", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit({"status": "activated", "pair": args.pair, "receipt": receipt})
 
 
 def render_report_cmd(args: argparse.Namespace) -> None:
@@ -186,6 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     create_cmd.add_argument("--model", default="openai/gpt-5.6-sol")
     create_cmd.add_argument("--agent", default="business-bench")
     create_cmd.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
+    create_cmd.add_argument("--protocol", choices=("v1", "v2"), default="v1")
+    create_cmd.add_argument("--run-root", help="override the durable runs root")
     create_cmd.set_defaults(func=create)
 
     step_cmd = sub.add_parser("step", help="execute one durable role call or business turn")
@@ -217,6 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     pair_create.add_argument("--model", default="openai/gpt-5.6-sol")
     pair_create.add_argument("--agent", default="business-bench")
     pair_create.add_argument("--thinking", choices=("low", "medium", "high", "xhigh"), default="medium")
+    pair_create.add_argument("--protocol", choices=("v1", "v2"), default="v1")
+    pair_create.add_argument("--run-root", help="override the durable runs root")
     pair_create.set_defaults(func=create_pair_cmd)
 
     pair_run = sub.add_parser("pair-batch", help="advance a pair fairly until completion or provider quota")
@@ -237,6 +272,20 @@ def build_parser() -> argparse.ArgumentParser:
     pair_verify.add_argument("--pair", required=True)
     pair_verify.add_argument("--ledger", help="override the global provider-usage ledger path")
     pair_verify.set_defaults(func=verify_pair_cmd)
+
+    v2_preregister = sub.add_parser(
+        "verify-v2-preregistration",
+        help="verify the frozen autonomous v2 design without model calls",
+    )
+    v2_preregister.set_defaults(func=verify_v2_preregistration_cmd)
+
+    v2_activate = sub.add_parser(
+        "activate-v2-pair",
+        help="bind a ready offline v2 pair to the exact clean published source commit",
+    )
+    v2_activate.add_argument("--pair", required=True)
+    v2_activate.add_argument("--source-commit", required=True)
+    v2_activate.set_defaults(func=activate_v2_pair_cmd)
 
     pair_report = sub.add_parser(
         "render-report",

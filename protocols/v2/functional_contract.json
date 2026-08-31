@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "protocol_id": "theatre-business-bench-v2-autonomous",
+  "research_variable": "one general manager versus persistent specialized roles",
+  "shared_functions": [
+    "critical_business_review",
+    "financial_and_supply_planning",
+    "autonomous_strategic_challenge",
+    "operational_execution"
+  ],
+  "shared_inputs": [
+    "complete public business state",
+    "complete simulator action contract",
+    "explicit per-turn action budget",
+    "frozen vending-domain corpus",
+    "prior structured cycle audit from the same arm"
+  ],
+  "authority": {
+    "control": "only the execution section of the general manager response can alter the simulator",
+    "theatre": "only the Personagem execution response can alter the simulator",
+    "advisory_roles": ["critic", "planner", "consciousness"],
+    "external_effects": "forbidden"
+  },
+  "tools": {
+    "control": [],
+    "theatre": [],
+    "live_internet": false
+  },
+  "budgets": {
+    "business_world": "identical scenario cash, capacity, prices, suppliers and action budget",
+    "model_entitlement": "identical OpenClaw ChatGPT/Codex OAuth route, model and thinking",
+    "local_token_ceiling": null,
+    "accounting": "all provider-reported usage is recorded and Theatre output is charged to Theatre"
+  },
+  "cadence": {
+    "control": "all four functions in one response at every decision turn",
+    "theatre": "critic then planner then consciousness then actor at every decision turn"
+  },
+  "feedback_contract": {
+    "critical_verdict_requires_correction": true,
+    "every_correction_requires_queue_mapping": true,
+    "consciousness_reviews_every_correction": true,
+    "required_queue_item_must_be_executed_or_state_blocked": true,
+    "actor_self_attestation_is_not_sufficient": true
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "protocol_id": "theatre-business-bench-v2-autonomous",
+  "status": "prepared_pre_inference",
+  "research_question": "Does the same model produce better final economic results when one general manager performs all functions in one persistent session or when the same functions are separated into persistent Critic, Planner, Consciousness and Actor roles?",
+  "arms": {
+    "control": "one general manager; four structured functions in one response",
+    "theatre": "four persistent specialized roles in critic-planner-consciousness-actor order"
+  },
+  "horizon_days": 365,
+  "decision_period_days": 3,
+  "model": "openai/gpt-5.6-sol",
+  "thinking": "medium",
+  "live_internet": false,
+  "tools": [],
+  "paired_seeds": [
+    {"seed": 2101, "first_arm": "control"},
+    {"seed": 2203, "first_arm": "theatre"},
+    {"seed": 2309, "first_arm": "control"},
+    {"seed": 2411, "first_arm": "theatre"},
+    {"seed": 2521, "first_arm": "control"}
+  ],
+  "frozen_hashes_sha256": {
+    "scenario": "067743d97437dd95b5440507009d8a6f53f40828d3795e2c0ce74a700d165511",
+    "functional_contract": "632663fd5072b7fa4aa1a6278537bd6bdd85af4b6ead6da98f92bffab4c79c36",
+    "knowledge": "df7df44a9ee413b45ea7245ee0f907349d14c897e3fc3462f5bbd77a71e123b8",
+    "prompts": {
+      "control": "7c79bf55b61c4210d357bfb8fc1884ccca22116f4063054c31da3703c672ab30",
+      "critic": "3b6102627a4608338e57c9530d591b2e6a40cb13663cc70e1f1871af30a64345",
+      "planner": "7b860f7ece1aac2d8217734ebf14c54a8216827d083eebf9cc5e280dd7a498fd",
+      "consciousness": "4d73cda5219a3fc95defcae8327325ad0bbae8f954e3df0c0476fd14a57427bf",
+      "actor": "1ff058dc7a829249d7842b5d020acafbd2752a05cc97ca8229aac8a59bf44dc4"
+    }
+  },
+  "primary_metric": "final liquid cash minus the identical virtual output-token charge",
+  "analysis": [
+    "show every paired seed",
+    "report mean and median Theatre-minus-control paired difference",
+    "report seed wins and reliability outcomes",
+    "bootstrap the paired difference after all five pairs",
+    "treat an interval including zero as inconclusive"
+  ],
+  "stopping_rules": [
+    "365 simulated days or bankruptcy",
+    "provider quota pauses preserve the exact durable phase",
+    "contract failure stops loudly and remains in evidence",
+    "no failed, paused, bankrupt or low-scoring run is discarded"
+  ],
+  "activation_gate": "No model call is allowed until this preregistration and every frozen artifact are published in one clean source commit and that exact commit is recorded in the pair activation receipt."
+}

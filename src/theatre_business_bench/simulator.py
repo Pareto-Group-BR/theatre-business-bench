@@ -163,7 +163,7 @@ class VendingSimulator:
                 "relationship": round(state["relationships"][supplier_id], 3),
                 "offers": offers
             })
-        return {
+        view = {
             "scenario": state["scenario_id"],
             "seed": state["seed"],
             "day": state["day"],
@@ -189,6 +189,12 @@ class VendingSimulator:
             "metrics": copy.deepcopy(state["metrics"]),
             "allowed_actions": self.action_contract()
         }
+        if self.scenario.get("expose_action_budget"):
+            view["action_budget"] = {
+                "max_actions_per_turn": int(self.scenario["max_actions_per_turn"]),
+                "decision_period_days": int(self.scenario["decision_period_days"]),
+            }
+        return view
 
     def action_contract(self) -> list[dict[str, Any]]:
         return [
@@ -219,7 +225,7 @@ class VendingSimulator:
         self.state["metrics"]["invalid_actions"] += len(rejected)
         self.state["last_turn"] = {"accepted": accepted, "rejected": rejected}
         self.state["recent_events"] = []
-        days = int(advance_days or self.scenario["decision_period_days"])
+        days = int(self.scenario["decision_period_days"] if advance_days is None else advance_days)
         days = max(0, min(days, self.scenario["days"] - self.state["day"]))
         advanced = 0
         for _ in range(days):
