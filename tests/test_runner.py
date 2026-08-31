@@ -328,6 +328,49 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(tampered["status"], "failed")
             self.assertTrue(any("does not bind raw failure evidence" in error for error in tampered["errors"]))
 
+    def test_single_reconciled_failure_requires_its_forensic_receipt(self) -> None:
+        invalid_text = '{"audit":{"verdict":"on_track"}'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = create_pair(seed=2201, run_root=root, protocol="v2")
+            with patch("theatre_business_bench.v2._published_source_identity"):
+                activate_v2_pair(pair_dir, "a" * 40)
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            flow = read_json(control / "flow.json")
+            flow.update({"status": "running", "current_step": "model_roles", "phase": "control"})
+            atomic_json(control / "flow.json", flow)
+            session_key = f"agent:business-bench:bench-{control.name.lower()}-control"
+            trajectory = root / "source.trajectory.jsonl"
+            trajectory.write_text("".join(json.dumps(event) + "\n" for event in (
+                {
+                    "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                    "traceId": "trace-official", "type": "session.started",
+                    "ts": "2026-08-31T06:01:00.000Z", "sessionId": "session-official",
+                    "sessionKey": session_key, "runId": "gateway-old-1",
+                    "provider": "openai", "modelId": "gpt-5.6-sol", "data": {},
+                },
+                {
+                    "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                    "traceId": "trace-official", "type": "model.completed",
+                    "ts": "2026-08-31T06:01:01.000Z", "sessionId": "session-official",
+                    "sessionKey": session_key, "runId": "gateway-old-1",
+                    "provider": "openai", "modelId": "gpt-5.6-sol",
+                    "data": {
+                        "usage": {"input": 10, "output": 5, "cacheRead": 2, "total": 17},
+                        "assistantTexts": [invalid_text], "timedOut": False,
+                        "aborted": False, "promptError": None,
+                    },
+                },
+            )), encoding="utf-8")
+
+            reconcile_openclaw_failures(pair_dir, "control", trajectory, ["gateway-old-1"])
+            self.assertEqual(verify_pair(pair_dir)["status"], "passed")
+            (control / "evidence-reconciliation.json").unlink()
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("control: forensic failed phase lacks reconciliation receipt", report["errors"])
+
     def test_v2_frozen_preregistration_tamper_fails_pair_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pair_dir = create_pair(seed=2201, run_root=Path(directory), protocol="v2")

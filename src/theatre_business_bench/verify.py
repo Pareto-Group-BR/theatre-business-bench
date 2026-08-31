@@ -367,28 +367,35 @@ def _verify_run(
         for index, failure in enumerate(failures):
             if failure.get("turn_index") != len(turns) or failure.get("role") != current_role:
                 errors.append(f"{expected_arm}: model failure {index} does not match the terminal flow phase")
-        if len(failures) > 1:
-            reconciled = [
-                item for item in failures
-                if item.get("evidence_source") == "openclaw_trajectory_reconciliation"
-            ]
+        reconciled = [
+            item for item in failures
+            if item.get("evidence_source") == "openclaw_trajectory_reconciliation"
+        ]
+        if reconciled:
             ordinals = [item.get("attempt_index") for item in reconciled]
             gateway_ids = [item.get("gateway_run_id") for item in reconciled]
             if len(reconciled) != len(failures):
-                errors.append(f"{expected_arm}: repeated failed phase contains non-forensic evidence")
-            if ordinals != list(range(1, len(failures) + 1)):
+                errors.append(f"{expected_arm}: forensic failed phase contains non-forensic evidence")
+            if ordinals != list(range(1, len(reconciled) + 1)):
                 errors.append(f"{expected_arm}: reconciled failure attempt order is invalid")
             if any(not isinstance(value, str) or not value for value in gateway_ids) or len(set(gateway_ids)) != len(gateway_ids):
                 errors.append(f"{expected_arm}: reconciled failure gateway ids are missing or duplicated")
             receipt_path = run_dir / "evidence-reconciliation.json"
             if not receipt_path.is_file():
-                errors.append(f"{expected_arm}: repeated failed phase lacks reconciliation receipt")
+                errors.append(f"{expected_arm}: forensic failed phase lacks reconciliation receipt")
             else:
                 receipt = read_json(receipt_path)
                 receipt_events = receipt.get("events", [])
                 receipt_ids = [item.get("gateway_run_id") for item in receipt_events]
                 if receipt.get("status") != "reconciled_failed_contract" or receipt_ids != gateway_ids:
                     errors.append(f"{expected_arm}: reconciliation receipt does not match failures")
+                if (
+                    receipt.get("run_id") != run_id
+                    or receipt.get("arm") != expected_arm
+                    or receipt.get("turn_index") != len(turns)
+                    or receipt.get("role") != current_role
+                ):
+                    errors.append(f"{expected_arm}: reconciliation receipt identity mismatch")
                 if receipt.get("model_decisions_added") != 0 or receipt.get("simulator_turns_added") != 0:
                     errors.append(f"{expected_arm}: reconciliation receipt claims a state transition")
                 receipt_source = receipt.get("source", {})
