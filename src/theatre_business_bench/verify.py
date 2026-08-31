@@ -329,7 +329,23 @@ def _verify_run(
         ],
         key=lambda item: (item[0], item[1]),
     )
-    actual_calls = [(item.get("turn_index"), item.get("role")) for _, _, item in attempts]
+    cadence_attempts: list[dict[str, Any]] = []
+    for _, _, item in attempts:
+        call = (item.get("turn_index"), item.get("role"))
+        previous = (
+            (cadence_attempts[-1].get("turn_index"), cadence_attempts[-1].get("role"))
+            if cadence_attempts else None
+        )
+        if (
+            item.get("evidence_source") == "openclaw_trajectory_reconciliation"
+            and previous == call
+        ):
+            # A pre-recorder bug could repeat the same terminal phase. Count
+            # every provider call as evidence/usage, but never pretend the
+            # duplicate was another protocol phase.
+            continue
+        cadence_attempts.append(item)
+    actual_calls = [(item.get("turn_index"), item.get("role")) for item in cadence_attempts]
     if actual_calls[:len(expected_calls)] != expected_calls:
         errors.append(f"{expected_arm}: completed role cadence/order mismatch")
     pending_calls = actual_calls[len(expected_calls):]
@@ -351,6 +367,60 @@ def _verify_run(
         for index, failure in enumerate(failures):
             if failure.get("turn_index") != len(turns) or failure.get("role") != current_role:
                 errors.append(f"{expected_arm}: model failure {index} does not match the terminal flow phase")
+        reconciled = [
+            item for item in failures
+            if item.get("evidence_source") == "openclaw_trajectory_reconciliation"
+        ]
+        if reconciled:
+            ordinals = [item.get("attempt_index") for item in reconciled]
+            gateway_ids = [item.get("gateway_run_id") for item in reconciled]
+            if len(reconciled) != len(failures):
+                errors.append(f"{expected_arm}: forensic failed phase contains non-forensic evidence")
+            if ordinals != list(range(1, len(reconciled) + 1)):
+                errors.append(f"{expected_arm}: reconciled failure attempt order is invalid")
+            if any(not isinstance(value, str) or not value for value in gateway_ids) or len(set(gateway_ids)) != len(gateway_ids):
+                errors.append(f"{expected_arm}: reconciled failure gateway ids are missing or duplicated")
+            receipt_path = run_dir / "evidence-reconciliation.json"
+            if not receipt_path.is_file():
+                errors.append(f"{expected_arm}: forensic failed phase lacks reconciliation receipt")
+            else:
+                receipt = read_json(receipt_path)
+                receipt_events = receipt.get("events", [])
+                receipt_ids = [item.get("gateway_run_id") for item in receipt_events]
+                if receipt.get("status") != "reconciled_failed_contract" or receipt_ids != gateway_ids:
+                    errors.append(f"{expected_arm}: reconciliation receipt does not match failures")
+                if (
+                    receipt.get("run_id") != run_id
+                    or receipt.get("arm") != expected_arm
+                    or receipt.get("turn_index") != len(turns)
+                    or receipt.get("role") != current_role
+                ):
+                    errors.append(f"{expected_arm}: reconciliation receipt identity mismatch")
+                if receipt.get("model_decisions_added") != 0 or receipt.get("simulator_turns_added") != 0:
+                    errors.append(f"{expected_arm}: reconciliation receipt claims a state transition")
+                receipt_source = receipt.get("source", {})
+                source_sha = receipt_source.get("sha256") if isinstance(receipt_source, dict) else None
+                if not isinstance(source_sha, str) or len(source_sha) != 64:
+                    errors.append(f"{expected_arm}: reconciliation source hash is invalid")
+                source_path = receipt_source.get("path") if isinstance(receipt_source, dict) else None
+                if isinstance(source_path, str) and Path(source_path).is_file():
+                    if hashlib.sha256(Path(source_path).read_bytes()).hexdigest() != source_sha:
+                        errors.append(f"{expected_arm}: available reconciliation source hash mismatch")
+                usage_by_gateway = {
+                    item.get("gateway_run_id"): item
+                    for item in usage
+                    if item.get("gateway_run_id") in gateway_ids
+                }
+                for failure, event in zip(reconciled, receipt_events):
+                    usage_row = usage_by_gateway.get(failure.get("gateway_run_id"), {})
+                    if (
+                        event.get("response_hash") != failure.get("response_hash")
+                        or event.get("trajectory_event_sha256") != failure.get("trajectory_event_sha256")
+                        or event.get("provider_usage") != usage_row.get("usage")
+                        or event.get("duration_ms") != usage_row.get("duration_ms")
+                    ):
+                        errors.append(f"{expected_arm}: reconciliation event does not bind raw failure evidence")
+                        break
 
     def usage_sum(key: str) -> int:
         return sum(

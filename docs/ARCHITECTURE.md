@@ -88,6 +88,15 @@ the provider-reported usage and exact raw response, marks the flow
 `failed_contract`, and stops. Such a call is evidence and is never retried as if
 it had not happened.
 
+Calls made before that fail-closed recorder existed are never reconstructed by
+hand. `reconcile-openclaw-failures` selects their immutable `model.completed`
+events by gateway run id from one OpenClaw trajectory, verifies run/session,
+provider, model, raw response, parse failure, and provider usage, then writes an
+idempotent reconciliation receipt. The affected pair becomes terminal
+`failed_contract`; the command adds no model decision, simulator turn, or
+economic state transition. Repeated attempts at one phase are valid evidence
+only when the verifier can bind all of them to that forensic receipt.
+
 The canonical pilot runner holds a persistent workspace lock for the lifetime
 of `pair-batch`. The file descriptor is inherited by the model-execution child,
 so a scheduler or gateway interruption cannot make a still-running batch look

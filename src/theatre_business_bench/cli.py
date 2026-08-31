@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .evidence import reconcile_openclaw_failures
 from .policies import heuristic_actions
 from .report import (
     ReportGateError,
@@ -164,6 +165,17 @@ def activate_v2_cmd(args: argparse.Namespace) -> None:
     emit({"status": "activated", "pair_dir": str(Path(args.pair).resolve()), "receipt": receipt})
 
 
+def reconcile_failures_cmd(args: argparse.Namespace) -> None:
+    try:
+        receipt = reconcile_openclaw_failures(
+            Path(args.pair), args.arm, Path(args.trajectory), args.gateway_run_id
+        )
+    except V2ContractError as exc:
+        emit({"status": "reconciliation_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit(receipt)
+
+
 def render_report_cmd(args: argparse.Namespace) -> None:
     try:
         report = build_executive_report(
@@ -283,6 +295,16 @@ def build_parser() -> argparse.ArgumentParser:
     v2_activate.add_argument("--pair", required=True)
     v2_activate.add_argument("--source-commit", required=True)
     v2_activate.set_defaults(func=activate_v2_cmd)
+
+    reconcile = sub.add_parser(
+        "reconcile-openclaw-failures",
+        help="import pre-fix invalid provider calls from an auditable OpenClaw trajectory",
+    )
+    reconcile.add_argument("--pair", required=True)
+    reconcile.add_argument("--arm", choices=("control", "theatre"), required=True)
+    reconcile.add_argument("--trajectory", required=True)
+    reconcile.add_argument("--gateway-run-id", action="append", required=True)
+    reconcile.set_defaults(func=reconcile_failures_cmd)
 
     pair_report = sub.add_parser(
         "render-report",

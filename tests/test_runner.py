@@ -30,6 +30,7 @@ from theatre_business_bench.transport import (
     parse_json_object,
 )
 from theatre_business_bench.cli import pair_batch
+from theatre_business_bench.evidence import reconcile_openclaw_failures
 from theatre_business_bench.v2 import activate_v2_pair
 from theatre_business_bench.verify import verify_pair
 
@@ -240,6 +241,135 @@ class RunnerTests(unittest.TestCase):
             report = verify_pair(pair_dir)
             self.assertEqual(report["status"], "passed", report["errors"])
             self.assertEqual(report["runs"]["control"]["model_failures"], 1)
+
+    def test_reconciles_two_historical_failures_from_trajectory_idempotently(self) -> None:
+        invalid_text = '{"audit":{"verdict":"on_track"}'
+        run_ids = ["gateway-old-1", "gateway-old-2"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = create_pair(seed=2201, run_root=root, protocol="v2")
+            with patch("theatre_business_bench.v2._published_source_identity"):
+                activate_v2_pair(pair_dir, "a" * 40)
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            flow = read_json(control / "flow.json")
+            flow.update({
+                "status": "running",
+                "current_step": "model_roles",
+                "turn_index": 0,
+                "phase": "control",
+                "review_required": False,
+                "schedule": {
+                    "turn_index": 0,
+                    "strategic_review_due": True,
+                    "consciousness_due": True,
+                    "critical_simulator_event": False,
+                },
+                "pending": {},
+            })
+            atomic_json(control / "flow.json", flow)
+            session_key = f"agent:business-bench:bench-{control.name.lower()}-control"
+            trajectory = root / "source.trajectory.jsonl"
+            events = []
+            for index, run_id in enumerate(run_ids, 1):
+                events.append({
+                    "traceSchema": "openclaw-trajectory",
+                    "schemaVersion": 1,
+                    "traceId": "trace-official",
+                    "type": "session.started",
+                    "ts": f"2026-08-31T06:0{index}:00.000Z",
+                    "sessionId": "session-official",
+                    "sessionKey": session_key,
+                    "runId": run_id,
+                    "provider": "openai",
+                    "modelId": "gpt-5.6-sol",
+                    "data": {},
+                })
+                events.append({
+                    "traceSchema": "openclaw-trajectory",
+                    "schemaVersion": 1,
+                    "traceId": "trace-official",
+                    "type": "model.completed",
+                    "ts": f"2026-08-31T06:0{index}:01.000Z",
+                    "sessionId": "session-official",
+                    "sessionKey": session_key,
+                    "runId": run_id,
+                    "provider": "openai",
+                    "modelId": "gpt-5.6-sol",
+                    "data": {
+                        "usage": {"input": 10, "output": 5, "cacheRead": 2, "total": 17},
+                        "assistantTexts": [invalid_text],
+                        "timedOut": False,
+                        "aborted": False,
+                        "promptError": None,
+                    },
+                })
+            trajectory.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+            first = reconcile_openclaw_failures(pair_dir, "control", trajectory, run_ids)
+            second = reconcile_openclaw_failures(pair_dir, "control", trajectory, run_ids)
+            self.assertEqual(first["status"], "reconciled_failed_contract")
+            self.assertEqual(second["status"], "reconciled_failed_contract")
+            self.assertEqual(len((control / "model-failures.jsonl").read_text().splitlines()), 2)
+            self.assertEqual(len((control / "usage.jsonl").read_text().splitlines()), 2)
+            self.assertEqual(len((root / "usage-ledger.jsonl").read_text().splitlines()), 2)
+            self.assertEqual(read_json(control / "state.json")["day"], 0)
+            self.assertFalse((control / "model-decisions.jsonl").exists())
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+            self.assertEqual(report["pair_status"], "failed_contract")
+            self.assertEqual(report["runs"]["control"]["model_failures"], 2)
+
+            receipt_path = control / "evidence-reconciliation.json"
+            receipt = read_json(receipt_path)
+            receipt["events"][0]["provider_usage"]["total"] += 1
+            atomic_json(receipt_path, receipt)
+            tampered = verify_pair(pair_dir)
+            self.assertEqual(tampered["status"], "failed")
+            self.assertTrue(any("does not bind raw failure evidence" in error for error in tampered["errors"]))
+
+    def test_single_reconciled_failure_requires_its_forensic_receipt(self) -> None:
+        invalid_text = '{"audit":{"verdict":"on_track"}'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = create_pair(seed=2201, run_root=root, protocol="v2")
+            with patch("theatre_business_bench.v2._published_source_identity"):
+                activate_v2_pair(pair_dir, "a" * 40)
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            flow = read_json(control / "flow.json")
+            flow.update({"status": "running", "current_step": "model_roles", "phase": "control"})
+            atomic_json(control / "flow.json", flow)
+            session_key = f"agent:business-bench:bench-{control.name.lower()}-control"
+            trajectory = root / "source.trajectory.jsonl"
+            trajectory.write_text("".join(json.dumps(event) + "\n" for event in (
+                {
+                    "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                    "traceId": "trace-official", "type": "session.started",
+                    "ts": "2026-08-31T06:01:00.000Z", "sessionId": "session-official",
+                    "sessionKey": session_key, "runId": "gateway-old-1",
+                    "provider": "openai", "modelId": "gpt-5.6-sol", "data": {},
+                },
+                {
+                    "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                    "traceId": "trace-official", "type": "model.completed",
+                    "ts": "2026-08-31T06:01:01.000Z", "sessionId": "session-official",
+                    "sessionKey": session_key, "runId": "gateway-old-1",
+                    "provider": "openai", "modelId": "gpt-5.6-sol",
+                    "data": {
+                        "usage": {"input": 10, "output": 5, "cacheRead": 2, "total": 17},
+                        "assistantTexts": [invalid_text], "timedOut": False,
+                        "aborted": False, "promptError": None,
+                    },
+                },
+            )), encoding="utf-8")
+
+            reconcile_openclaw_failures(pair_dir, "control", trajectory, ["gateway-old-1"])
+            self.assertEqual(verify_pair(pair_dir)["status"], "passed")
+            (control / "evidence-reconciliation.json").unlink()
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("control: forensic failed phase lacks reconciliation receipt", report["errors"])
 
     def test_v2_frozen_preregistration_tamper_fails_pair_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

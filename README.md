@@ -114,6 +114,18 @@ provider usage, and the run-root ledger before any resume. See
 [`docs/EXPERIMENT_PROTOCOL_V2.md`](docs/EXPERIMENT_PROTOCOL_V2.md) and
 [`preregistration/v2.json`](preregistration/v2.json).
 
+For a provider call that predates the persisted-failure recorder, use the
+narrow forensic command below instead of retrying or editing ledgers. It derives
+the exact failed evidence from OpenClaw's trajectory and terminally marks the
+official pair; it cannot apply actions or advance the simulator.
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli reconcile-openclaw-failures \
+  --pair /absolute/run-root/pairs/<pair-id> --arm control \
+  --trajectory /absolute/openclaw/session.trajectory.jsonl \
+  --gateway-run-id <provider-run-id>
+```
+
 Sources:
 
 - https://andonlabs.com/evals/vending-bench-2
