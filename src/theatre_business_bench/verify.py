@@ -8,6 +8,7 @@ from typing import Any
 
 from .runner import PROMPT_FILES, read_json
 from .simulator import VendingSimulator, stable_hash
+from .transport import ModelTransportError, parse_json_object
 from .v2 import (
     PREREGISTRATION,
     audit_preregistration,
@@ -99,25 +100,48 @@ def _verify_run(
 
     usage = _read_jsonl(run_dir / "usage.jsonl", errors)
     decisions = _read_jsonl(run_dir / "model-decisions.jsonl", errors)
+    failures = _read_jsonl(run_dir / "model-failures.jsonl", errors)
     turns = _read_jsonl(run_dir / "turns.jsonl", errors)
-    if len(usage) != len(decisions):
-        errors.append(f"{expected_arm}: usage/decision count mismatch ({len(usage)} != {len(decisions)})")
+    if len(usage) != len(decisions) + len(failures):
+        errors.append(
+            f"{expected_arm}: usage/evidence count mismatch "
+            f"({len(usage)} != {len(decisions)} decisions + {len(failures)} failures)"
+        )
 
     for index, decision in enumerate(decisions):
         content = decision.get("content")
         if stable_hash(content) != decision.get("response_hash"):
             errors.append(f"{expected_arm}: decision {index} response hash mismatch")
-        if index < len(usage):
-            usage_row = usage[index]
-            if decision.get("response_hash") != usage_row.get("response_hash"):
-                errors.append(f"{expected_arm}: usage/decision response hash mismatch at call {index}")
-            if decision.get("role") != usage_row.get("role"):
-                errors.append(f"{expected_arm}: usage/decision role mismatch at call {index}")
         if manifest.get("protocol_version") == "v2":
             role = decision.get("role")
             report = validate_role_output(role, content) if isinstance(role, str) else {"status": "failed", "errors": ["missing role"]}
             if report["status"] != "passed":
                 errors.append(f"{expected_arm}: invalid v2 {role} decision at call {index}: {'; '.join(report['errors'])}")
+
+    for index, failure in enumerate(failures):
+        raw_text = failure.get("raw_text")
+        if not isinstance(raw_text, str):
+            errors.append(f"{expected_arm}: model failure {index} is missing raw_text")
+            continue
+        if stable_hash(raw_text) != failure.get("response_hash"):
+            errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
+        try:
+            parse_json_object(raw_text)
+        except ModelTransportError as exc:
+            if failure.get("parse_error") != str(exc):
+                errors.append(f"{expected_arm}: model failure {index} parse error mismatch")
+        else:
+            errors.append(f"{expected_arm}: model failure {index} contains valid JSON")
+
+    evidence_counter = Counter(
+        (item.get("role"), item.get("response_hash"))
+        for item in [*decisions, *failures]
+    )
+    usage_evidence_counter = Counter(
+        (item.get("role"), item.get("response_hash")) for item in usage
+    )
+    if evidence_counter != usage_evidence_counter:
+        errors.append(f"{expected_arm}: usage/model evidence identity mismatch")
 
     expected_model = str(manifest.get("model", "")).split("/", 1)[-1]
     for index, row in enumerate(usage):
@@ -298,7 +322,14 @@ def _verify_run(
                 if review:
                     current_expected.extend(((current_turn, "critic"), (current_turn, "planner")))
             current_expected.append((current_turn, business_role))
-    actual_calls = [(item.get("turn_index"), item.get("role")) for item in decisions]
+    attempts = sorted(
+        [
+            *((item.get("timestamp", ""), index, item) for index, item in enumerate(decisions)),
+            *((item.get("timestamp", ""), len(decisions) + index, item) for index, item in enumerate(failures)),
+        ],
+        key=lambda item: (item[0], item[1]),
+    )
+    actual_calls = [(item.get("turn_index"), item.get("role")) for _, _, item in attempts]
     if actual_calls[:len(expected_calls)] != expected_calls:
         errors.append(f"{expected_arm}: completed role cadence/order mismatch")
     pending_calls = actual_calls[len(expected_calls):]
@@ -313,6 +344,13 @@ def _verify_run(
         flow.get("phase") is not None or flow.get("pending") not in ({}, None)
     ):
         errors.append(f"{expected_arm}: prepare_turn flow contains a pending role phase")
+    if failures:
+        if flow.get("status") != "failed_contract":
+            errors.append(f"{expected_arm}: model failure exists without failed_contract flow")
+        current_role = flow.get("phase")
+        for index, failure in enumerate(failures):
+            if failure.get("turn_index") != len(turns) or failure.get("role") != current_role:
+                errors.append(f"{expected_arm}: model failure {index} does not match the terminal flow phase")
 
     def usage_sum(key: str) -> int:
         return sum(
@@ -340,6 +378,7 @@ def _verify_run(
         "day": state.get("day"),
         "turns": len(turns),
         "model_calls": len(usage),
+        "model_failures": len(failures),
         "provider_total_tokens": total_tokens,
         "output_tokens": output_tokens,
         "liquid_cash": expected_score["liquid_cash"],
