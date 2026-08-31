@@ -1,0 +1,229 @@
+{
+  "campaign": {
+    "expected_pairs": 5,
+    "failed_contract_pairs": 5,
+    "pairs_with_economic_result": 0,
+    "protocol": "v2",
+    "status": "terminal_failed_contract",
+    "verified_pairs": 5
+  },
+  "caveats": [
+    "Este relatório mede integridade e confiabilidade operacional da campanha, não desempenho econômico comparável.",
+    "Dias, chamadas e tokens descrevem onde cada execução parou; não são scores finais nem podem ser agregados como se os horizontes fossem iguais.",
+    "Atribuição do braço que disparou o gate descreve o contrato observado; não estabelece superioridade do outro braço.",
+    "Qualquer protocolo futuro deve usar nova versão e novas seeds, preservando esta rodada sem edição, retomada ou descarte."
+  ],
+  "claim": "campanha oficial encerrada em falhas de contrato; resultado econômico não observado",
+  "economic_outcome": {
+    "bootstrap_interval": null,
+    "estimand_status": "not_observed",
+    "mean_paired_difference": null,
+    "median_paired_difference": null,
+    "paired_differences": null,
+    "reason": "nenhuma das cinco seeds produziu result.json; placares parciais não são resultados",
+    "winner": null
+  },
+  "integrity": {
+    "evidence_file_count": 168,
+    "evidence_manifest_sha256": "84fb5d2465a470cd8b93101f6878b17d6d806cd9940dd521a8b65d12ea766823",
+    "preregistration_digest": "a08345fc351ac81f7fdc3238d8b5eec284fa00780b82b3778130ef565147e7f9",
+    "report_digest": "2ad8139a1831fb345ed6f613af906e19382ef710545ca66d61c9d2f03cdc3030",
+    "status": "passed"
+  },
+  "next_boundary": {
+    "economic_proof": "requires a separately pre-registered future protocol and new seeds",
+    "official_v2_evidence": "immutable",
+    "resume_or_recreate_seeds_2201_2205": "forbidden"
+  },
+  "pairs": [
+    {
+      "arms": {
+        "control": {
+          "day": 24,
+          "flow_status": "failed_contract",
+          "model_calls": 10,
+          "model_failures": 2,
+          "output_tokens": 30870,
+          "provider_total_tokens": 512086,
+          "replay_state_hash": "65910780d15bb37cc8f3d374ae2ea57ee75c33927fe2a9e04f44430cb52dbf8e",
+          "run_id": "20260831T054851Z-control-s2201",
+          "turns": 8
+        },
+        "theatre": {
+          "day": 24,
+          "flow_status": "ready",
+          "model_calls": 11,
+          "model_failures": 0,
+          "output_tokens": 6179,
+          "provider_total_tokens": 318977,
+          "replay_state_hash": "67081645873b3aab46f8ba8740fc2229331f3a05bd2fcffc61eac21a62daa4e7",
+          "run_id": "20260831T054851Z-theatre-s2201",
+          "turns": 8
+        }
+      },
+      "failing_arm": "control",
+      "failure_message": "historical invalid model JSON reconciled from OpenClaw trajectory",
+      "failure_phase": "control",
+      "pair_id": "20260831T054851Z-pair-s2201",
+      "seed": 2201,
+      "status": "failed_contract",
+      "verification_digest": "d598b6b1b26c3fc75580392f07bff7ea61389520b6d9520d5e1e47d0510945da"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 57,
+          "flow_status": "ready",
+          "model_calls": 19,
+          "model_failures": 0,
+          "output_tokens": 88260,
+          "provider_total_tokens": 1920675,
+          "replay_state_hash": "686bead57fc458ce8c2ea3bd97348aaaa6602de1e7a01554672c80ab9c6d2022",
+          "run_id": "20260831T054852Z-control-s2202",
+          "turns": 19
+        },
+        "theatre": {
+          "day": 54,
+          "flow_status": "failed_contract",
+          "model_calls": 28,
+          "model_failures": 0,
+          "output_tokens": 23566,
+          "provider_total_tokens": 1382522,
+          "replay_state_hash": "b75e573038fc6f89eb54bff843f134cd513e9d346a76b08d4feec443bcbb5e4f",
+          "run_id": "20260831T054852Z-theatre-s2202",
+          "turns": 18
+        }
+      },
+      "failing_arm": "theatre",
+      "failure_message": "theatre handoff: actor did not execute every bound critical-correction item",
+      "failure_phase": "actor",
+      "pair_id": "20260831T054852Z-pair-s2202",
+      "seed": 2202,
+      "status": "failed_contract",
+      "verification_digest": "fb49f30fa721172a880bc9d5505013954188b75a5a35bc121e895ad0a47c203f"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 30,
+          "flow_status": "ready",
+          "model_calls": 10,
+          "model_failures": 0,
+          "output_tokens": 33296,
+          "provider_total_tokens": 523695,
+          "replay_state_hash": "da09fc1d2921d89bde7500906fb3b6bb54128dea251dff294ebb33af215e46a8",
+          "run_id": "20260831T054852Z-control-s2203",
+          "turns": 10
+        },
+        "theatre": {
+          "day": 27,
+          "flow_status": "failed_contract",
+          "model_calls": 19,
+          "model_failures": 0,
+          "output_tokens": 15017,
+          "provider_total_tokens": 607064,
+          "replay_state_hash": "738da4c8cb9aecafe860e5bde09d9f23a7ff8ab01a5f872cc6957059e555853a",
+          "run_id": "20260831T054852Z-theatre-s2203",
+          "turns": 9
+        }
+      },
+      "failing_arm": "theatre",
+      "failure_message": "theatre handoff: actor did not execute every bound critical-correction item",
+      "failure_phase": "actor",
+      "pair_id": "20260831T054852Z-pair-s2203",
+      "seed": 2203,
+      "status": "failed_contract",
+      "verification_digest": "f765676b7900c9c13e44f24db21c344d69accdbd8bac6bea7791b34a678036d7"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 30,
+          "flow_status": "ready",
+          "model_calls": 10,
+          "model_failures": 0,
+          "output_tokens": 37657,
+          "provider_total_tokens": 535985,
+          "replay_state_hash": "be95e15b7476170ca8796a7a8043d36fe6a6e71bb082ae0b4c9a01e09dc1fdbf",
+          "run_id": "20260831T054852Z-control-s2204",
+          "turns": 10
+        },
+        "theatre": {
+          "day": 27,
+          "flow_status": "failed_contract",
+          "model_calls": 16,
+          "model_failures": 0,
+          "output_tokens": 9939,
+          "provider_total_tokens": 507733,
+          "replay_state_hash": "c762138e05e61482ff940073b0ca99215e5efa82593e1a0e9b1f8d3e992dc6f6",
+          "run_id": "20260831T054852Z-theatre-s2204",
+          "turns": 9
+        }
+      },
+      "failing_arm": "theatre",
+      "failure_message": "theatre handoff: actor did not execute every bound critical-correction item",
+      "failure_phase": "actor",
+      "pair_id": "20260831T054852Z-pair-s2204",
+      "seed": 2204,
+      "status": "failed_contract",
+      "verification_digest": "703322913c91f869ced93b1832d9ebb699a0b580d7dcc37edde51b683dd79755"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 3,
+          "flow_status": "failed_contract",
+          "model_calls": 2,
+          "model_failures": 0,
+          "output_tokens": 5542,
+          "provider_total_tokens": 45187,
+          "replay_state_hash": "d8f891cb51c67af1f50cc824b5859413cb0ec81dc3a2b9a00ae5558d5576f5f5",
+          "run_id": "20260831T054852Z-control-s2205",
+          "turns": 1
+        },
+        "theatre": {
+          "day": 3,
+          "flow_status": "ready",
+          "model_calls": 4,
+          "model_failures": 0,
+          "output_tokens": 2959,
+          "provider_total_tokens": 73697,
+          "replay_state_hash": "248085691a29ffa20f9ba13f1c27b04828eba099ae3bb80054e23a753d456c12",
+          "run_id": "20260831T054852Z-theatre-s2205",
+          "turns": 1
+        }
+      },
+      "failing_arm": "control",
+      "failure_message": "control: control plan omits a required critical-correction action type",
+      "failure_phase": "control",
+      "pair_id": "20260831T054852Z-pair-s2205",
+      "seed": 2205,
+      "status": "failed_contract",
+      "verification_digest": "17a03f59e173582e4897b88f7c5cf5854cc4aa2eb4f22ecfe8ee7033b6348acd"
+    }
+  ],
+  "reliability": {
+    "failed_pairs_by_arm": {
+      "control": 2,
+      "theatre": 3
+    },
+    "failed_pairs_by_phase": {
+      "actor": 3,
+      "control": 2
+    },
+    "usage_by_arm": {
+      "control": {
+        "model_calls": 51,
+        "output_tokens": 195625,
+        "provider_total_tokens": 3537628
+      },
+      "theatre": {
+        "model_calls": 78,
+        "output_tokens": 57660,
+        "provider_total_tokens": 2889993
+      }
+    }
+  },
+  "report_type": "official_v2_terminal_campaign",
+  "schema_version": 1
+}

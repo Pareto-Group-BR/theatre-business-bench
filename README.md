@@ -81,13 +81,38 @@ paired seeds, full logs, replay verification, and the planned paired analysis.
 
 ## Theatre v2 autonomous experiment
 
-The autonomous v2 treatment is pre-registered, executable, and still has **no
-v2 inference or economic result**. It gives the single-agent control and
-Theatre the same four functional responsibilities, frozen evidence, and visible
-14-action contract; only cognitive organization differs. Theatre routes
-Crítico → optional Consciência → Roteirista → Personagem on scheduled reviews,
-while control carries the same responsibilities and schedule flags inside one
-combined response.
+The autonomous v2 treatment was pre-registered and all five official seeds were
+executed. Every pair terminated `failed_contract` before producing
+`result.json`: the failing gate was in control for two seeds and in Theatre for
+three. All five replays and the frozen-artifact audit pass, but there is **no
+economic winner or aggregate**. Seeds 2201–2205 are immutable and must never be
+resumed, recreated, deleted, or edited.
+
+- [Verified terminal campaign evidence](v2-terminal-campaign.html)
+- [Executive Markdown](docs/V2_TERMINAL_CAMPAIGN.md)
+- [Canonical machine-readable evidence](v2-terminal-campaign.json)
+
+The renderer is deliberately separate from `render-report`: it publishes
+reliability, failure causes, days, calls, tokens, replay hashes, and evidence
+digests while forcing every economic outcome field to remain null.
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli render-v2-campaign \
+  --run-root /absolute/durable/path/theatre-business-bench-v2 \
+  --json-out /tmp/v2-terminal-campaign.json \
+  --markdown-out /tmp/V2_TERMINAL_CAMPAIGN.md \
+  --html-out /tmp/v2-terminal-campaign.html
+```
+
+The frozen design gave the single-agent control and Theatre the same four
+functional responsibilities, frozen evidence, and visible 14-action contract;
+only cognitive organization differed. Theatre routed Crítico → optional
+Consciência → Roteirista → Personagem on scheduled reviews, while control
+carried the same responsibilities and schedule flags in one response.
+
+The creation/activation flow below documents the executor contract. It must be
+used only for a separately pre-registered future protocol with new seeds, never
+for the terminal v2 seeds.
 
 ```bash
 PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v2-preregistration

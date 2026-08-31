@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .campaign import build_v2_terminal_campaign, write_v2_campaign_bundle
 from .evidence import reconcile_openclaw_failures
 from .policies import heuristic_actions
 from .report import (
@@ -209,6 +210,26 @@ def render_cockpit_cmd(args: argparse.Namespace) -> None:
     emit(cockpit)
 
 
+def render_v2_campaign_cmd(args: argparse.Namespace) -> None:
+    try:
+        report = build_v2_terminal_campaign(
+            Path(args.run_root),
+            preregistration=Path(args.preregistration) if args.preregistration else None,
+            ledger_path=Path(args.ledger) if args.ledger else None,
+        )
+        write_v2_campaign_bundle(
+            Path(args.run_root),
+            report,
+            json_out=Path(args.json_out) if args.json_out else None,
+            markdown_out=Path(args.markdown_out) if args.markdown_out else None,
+            html_out=Path(args.html_out) if args.html_out else None,
+        )
+    except ReportGateError as exc:
+        emit({"status": "campaign_gate_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit(report)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="business-bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -325,6 +346,18 @@ def build_parser() -> argparse.ArgumentParser:
     pair_cockpit.add_argument("--ledger", help="override the global provider-usage ledger path")
     pair_cockpit.add_argument("--json-out", help="write the live cockpit JSON")
     pair_cockpit.set_defaults(func=render_cockpit_cmd)
+
+    campaign_report = sub.add_parser(
+        "render-v2-campaign",
+        help="render reliability evidence for a verified terminal v2 campaign",
+    )
+    campaign_report.add_argument("--run-root", required=True)
+    campaign_report.add_argument("--preregistration", help="override preregistration/v2.json")
+    campaign_report.add_argument("--ledger", help="override the global provider-usage ledger path")
+    campaign_report.add_argument("--json-out", help="write canonical campaign evidence JSON")
+    campaign_report.add_argument("--markdown-out", help="write campaign evidence Markdown")
+    campaign_report.add_argument("--html-out", help="write standalone campaign evidence HTML")
+    campaign_report.set_defaults(func=render_v2_campaign_cmd)
     return parser
 
 
