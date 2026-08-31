@@ -108,6 +108,32 @@ def _verify_run(
             f"({len(usage)} != {len(decisions)} decisions + {len(failures)} failures)"
         )
 
+    def is_terminal_contract_decision(
+        index: int,
+        decision: dict[str, Any],
+        role: str,
+        validation_errors: list[str],
+    ) -> bool:
+        """Recognize the one charged parsed decision that stopped the v2 run.
+
+        The runner records parseable model output before enforcing the role
+        schema. A structurally invalid response is therefore durable decision
+        evidence, while the flow is terminal failed_contract and no simulator
+        turn is applied. Accept only that exact, final, flow-bound shape.
+        """
+        contract_failure = flow.get("contract_failure")
+        expected_message = f"{role}: " + "; ".join(validation_errors)
+        return (
+            flow.get("status") == "failed_contract"
+            and isinstance(contract_failure, dict)
+            and flow.get("phase") == role
+            and contract_failure.get("phase") == role
+            and contract_failure.get("message") == expected_message
+            and decision.get("turn_index") == len(turns)
+            and index == len(decisions) - 1
+            and not failures
+        )
+
     for index, decision in enumerate(decisions):
         content = decision.get("content")
         if stable_hash(content) != decision.get("response_hash"):
@@ -115,7 +141,10 @@ def _verify_run(
         if manifest.get("protocol_version") == "v2":
             role = decision.get("role")
             report = validate_role_output(role, content) if isinstance(role, str) else {"status": "failed", "errors": ["missing role"]}
-            if report["status"] != "passed":
+            if report["status"] != "passed" and not (
+                isinstance(role, str)
+                and is_terminal_contract_decision(index, decision, role, report["errors"])
+            ):
                 errors.append(f"{expected_arm}: invalid v2 {role} decision at call {index}: {'; '.join(report['errors'])}")
 
     for index, failure in enumerate(failures):

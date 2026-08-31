@@ -242,6 +242,65 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(report["status"], "passed", report["errors"])
             self.assertEqual(report["runs"]["control"]["model_failures"], 1)
 
+    def test_v2_invalid_structured_decision_is_charged_terminal_evidence(self) -> None:
+        invalid_control = {
+            "audit": {
+                "verdict": "critical",
+                "correction": {
+                    "required": True,
+                    "id": "C1",
+                    "required_action_types": ["place_order"],
+                    "verification": ["an order is accepted"],
+                },
+            },
+            "strategic_challenge": {"alternative_hypotheses": ["h1", "h2", "h3"]},
+            "plan": {
+                "action_queue": [],
+                "correction_binding": {"correction_id": "C1", "queue_item_ids": []},
+            },
+            "action_capacity": {"limit": 14, "used": 0},
+            "execution_queue": [],
+        }
+
+        def fake_invoke(_transport: OpenClawCodexTransport, session_key: str, _message: str) -> ModelResult:
+            return ModelResult(
+                content=invalid_control,
+                text=json.dumps(invalid_control),
+                run_id="gateway-invalid-structure",
+                session_id=session_key,
+                provider="openai",
+                model="gpt-5.6-sol",
+                duration_ms=1,
+                usage={"input": 10, "cache_read": 0, "cache_write": 0, "output": 5, "total": 15},
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = create_pair(seed=2201, run_root=root, protocol="v2")
+            with patch("theatre_business_bench.v2._published_source_identity"):
+                activate_v2_pair(pair_dir, "a" * 40)
+            with patch.object(OpenClawCodexTransport, "invoke", new=fake_invoke):
+                result = step_pair(pair_dir)
+
+            self.assertEqual(result["pair_status"], "failed_contract")
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            self.assertEqual(read_json(control / "state.json")["day"], 0)
+            self.assertEqual(len((control / "usage.jsonl").read_text().splitlines()), 1)
+            self.assertEqual(len((control / "model-decisions.jsonl").read_text().splitlines()), 1)
+            self.assertFalse((control / "model-failures.jsonl").exists())
+            self.assertEqual(len((root / "usage-ledger.jsonl").read_text().splitlines()), 1)
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+
+            flow_path = control / "flow.json"
+            flow = read_json(flow_path)
+            flow["contract_failure"]["message"] = "control: unrelated failure"
+            atomic_json(flow_path, flow)
+            tampered = verify_pair(pair_dir)
+            self.assertEqual(tampered["status"], "failed")
+            self.assertTrue(any("invalid v2 control decision" in error for error in tampered["errors"]))
+
     def test_reconciles_two_historical_failures_from_trajectory_idempotently(self) -> None:
         invalid_text = '{"audit":{"verdict":"on_track"}'
         run_ids = ["gateway-old-1", "gateway-old-2"]
