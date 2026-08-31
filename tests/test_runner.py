@@ -205,6 +205,42 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(tampered["status"], "failed")
             self.assertIn("pair: activated v2 pair is not marked official", tampered["errors"])
 
+    def test_v2_invalid_model_json_is_charged_preserved_and_stops_loud(self) -> None:
+        invalid_text = '{"audit":{"verdict":"on_track"}'
+
+        def fake_invoke(_transport: OpenClawCodexTransport, session_key: str, _message: str) -> ModelResult:
+            return ModelResult(
+                content=None,
+                text=invalid_text,
+                run_id="gateway-invalid",
+                session_id=session_key,
+                provider="openai",
+                model="gpt-5.6-sol",
+                duration_ms=1,
+                usage={"input": 10, "cache_read": 0, "cache_write": 0, "output": 5, "total": 15},
+                parse_error="invalid model JSON: Expecting ',' delimiter: line 1 column 32 (char 31)",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = create_pair(seed=2201, run_root=root, protocol="v2")
+            with patch("theatre_business_bench.v2._published_source_identity"):
+                activate_v2_pair(pair_dir, "a" * 40)
+            with patch.object(OpenClawCodexTransport, "invoke", new=fake_invoke):
+                result = step_pair(pair_dir)
+
+            self.assertEqual(result["pair_status"], "failed_contract")
+            pair = read_json(pair_dir / "pair.json")
+            control = Path(pair["control_run"])
+            self.assertEqual(read_json(control / "state.json")["day"], 0)
+            self.assertEqual(len((control / "usage.jsonl").read_text().splitlines()), 1)
+            self.assertEqual(len((control / "model-failures.jsonl").read_text().splitlines()), 1)
+            self.assertFalse((control / "model-decisions.jsonl").exists())
+            self.assertEqual(len((root / "usage-ledger.jsonl").read_text().splitlines()), 1)
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+            self.assertEqual(report["runs"]["control"]["model_failures"], 1)
+
     def test_v2_frozen_preregistration_tamper_fails_pair_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pair_dir = create_pair(seed=2201, run_root=Path(directory), protocol="v2")

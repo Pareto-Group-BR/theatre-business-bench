@@ -78,10 +78,15 @@ Every run owns:
 - `role-memory.json`: last accepted role outputs;
 - `usage.jsonl`: token ledger;
 - `model-decisions.jsonl`: immutable model outputs;
+- `model-failures.jsonl`: raw invalid model outputs that consumed provider quota but could not become decisions;
 - `turns.jsonl`: accepted/rejected actions and state hashes;
 - `result.json`: final score and evidence hash.
 
 If quota stops a cycle after Crítico but before Roteirista, `flow.json` resumes from Roteirista. Completed phases are never silently rerun.
+If a provider call succeeds but its response is not valid JSON, the runner records
+the provider-reported usage and exact raw response, marks the flow
+`failed_contract`, and stops. Such a call is evidence and is never retried as if
+it had not happened.
 
 The canonical pilot runner holds a persistent workspace lock for the lifetime
 of `pair-batch`. The file descriptor is inherited by the model-execution child,

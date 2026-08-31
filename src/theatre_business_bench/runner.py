@@ -243,7 +243,16 @@ def _session_key(manifest: dict[str, Any], role: str) -> str:
     return f"agent:{manifest['agent_id']}:bench-{safe_run}-{role}"
 
 
-def _record_model_result(run_dir: Path, manifest: dict[str, Any], role: str, result: ModelResult) -> None:
+def _model_response_hash(result: ModelResult) -> str:
+    return stable_hash(result.content if result.content is not None else result.text)
+
+
+def _record_model_result(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    role: str,
+    result: ModelResult,
+) -> dict[str, Any]:
     row = {
         "timestamp": utc_now(),
         "run_id": manifest["run_id"],
@@ -256,10 +265,14 @@ def _record_model_result(run_dir: Path, manifest: dict[str, Any], role: str, res
         "model": result.model,
         "duration_ms": result.duration_ms,
         "usage": result.usage,
-        "response_hash": stable_hash(result.content),
+        "response_hash": _model_response_hash(result),
     }
+    if result.parse_error is not None:
+        row["outcome"] = "invalid_model_json"
+        row["parse_error"] = result.parse_error
     append_jsonl(run_dir / "usage.jsonl", row)
     append_jsonl(_usage_ledger_path(manifest), row)
+    return row
 
 
 def _usage_ledger_path(manifest: dict[str, Any]) -> Path:
@@ -286,13 +299,25 @@ def _invoke_role(
     )
     if result.provider != "openai" or result.model != manifest["model"].split("/", 1)[-1]:
         raise RuntimeError(f"model drift detected: {result.provider}/{result.model}")
-    _record_model_result(run_dir, manifest, role, result)
+    usage_row = _record_model_result(run_dir, manifest, role, result)
+    if result.parse_error is not None or result.content is None:
+        append_jsonl(run_dir / "model-failures.jsonl", {
+            "timestamp": usage_row["timestamp"],
+            "turn_index": flow["turn_index"],
+            "role": role,
+            "raw_text": result.text,
+            "response_hash": usage_row["response_hash"],
+            "parse_error": result.parse_error or "model response did not contain a JSON object",
+            "gateway_run_id": result.run_id,
+            "session_id": result.session_id,
+        })
+        raise V2ContractError(f"{role}: {result.parse_error or 'invalid model JSON'}")
     append_jsonl(run_dir / "model-decisions.jsonl", {
         "timestamp": utc_now(),
         "turn_index": flow["turn_index"],
         "role": role,
         "content": result.content,
-        "response_hash": stable_hash(result.content),
+        "response_hash": usage_row["response_hash"],
     })
     return result.content
 

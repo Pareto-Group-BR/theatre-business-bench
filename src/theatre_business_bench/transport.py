@@ -14,7 +14,7 @@ class ModelTransportError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelResult:
-    content: dict[str, Any]
+    content: dict[str, Any] | None
     text: str
     run_id: str
     session_id: str
@@ -22,6 +22,7 @@ class ModelResult:
     model: str
     duration_ms: int
     usage: dict[str, int]
+    parse_error: str | None = None
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
@@ -91,8 +92,17 @@ class OpenClawCodexTransport:
             "cache_write": int(usage_raw.get("cacheWrite", 0)),
             "total": int(usage_raw.get("total", 0)),
         }
+        try:
+            content = parse_json_object(text)
+            parse_error = None
+        except ModelTransportError as exc:
+            # The provider call already happened and its reported usage is
+            # evidence. Return the intact envelope so the runner can persist
+            # the failed response before stopping the experiment loud.
+            content = None
+            parse_error = str(exc)
         return ModelResult(
-            content=parse_json_object(text),
+            content=content,
             text=text,
             run_id=str(envelope.get("runId", "")),
             session_id=str(meta.get("sessionId", "")),
@@ -100,5 +110,5 @@ class OpenClawCodexTransport:
             model=str(meta.get("model", "")),
             duration_ms=int(meta.get("durationMs", duration_ms)),
             usage=usage,
+            parse_error=parse_error,
         )
-
