@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .runner import PROMPT_FILES, read_json
 from .simulator import VendingSimulator, stable_hash
+from .v2 import (
+    PREREGISTRATION,
+    audit_preregistration,
+    extract_actions,
+    seed_plan,
+    validate_role_output,
+    validate_theatre_handoff,
+)
 
 
 def _canonical(value: Any) -> str:
@@ -62,12 +71,31 @@ def _verify_run(
         errors.append(f"{expected_arm}: scenario hash mismatch")
 
     prompt_hashes = manifest.get("prompt_hashes", {})
-    for role in PROMPT_FILES:
+    expected_prompt_roles = set(prompt_hashes) if manifest.get("protocol_version") == "v2" else set(PROMPT_FILES)
+    for role in expected_prompt_roles:
         snapshot = run_dir / f"prompt-{role}.md"
         if not snapshot.is_file():
             errors.append(f"{expected_arm}: missing frozen prompt for {role}")
         elif stable_hash(snapshot.read_text(encoding="utf-8")) != prompt_hashes.get(role):
             errors.append(f"{expected_arm}: frozen prompt hash mismatch for {role}")
+    if manifest.get("protocol_version") == "v2":
+        if expected_prompt_roles != {"control", "critic", "consciousness", "planner", "actor"}:
+            errors.append(f"{expected_arm}: v2 prompt role set mismatch")
+        for name, field in (("shared-corpus.md", "shared_corpus_hash"), ("protocol.md", "protocol_hash")):
+            snapshot = run_dir / name
+            if not snapshot.is_file():
+                errors.append(f"{expected_arm}: missing frozen {name}")
+            elif stable_hash(snapshot.read_text(encoding="utf-8")) != manifest.get(field):
+                errors.append(f"{expected_arm}: frozen {name} hash mismatch")
+        artifacts = manifest.get("artifact_hashes", {})
+        artifact_files = {
+            **{f"prompt_{role}": run_dir / f"prompt-{role}.md" for role in expected_prompt_roles},
+            "shared_corpus": run_dir / "shared-corpus.md",
+            "protocol": run_dir / "protocol.md",
+        }
+        for key, snapshot in artifact_files.items():
+            if snapshot.is_file() and hashlib.sha256(snapshot.read_bytes()).hexdigest() != artifacts.get(key):
+                errors.append(f"{expected_arm}: frozen artifact SHA-256 mismatch for {key}")
 
     usage = _read_jsonl(run_dir / "usage.jsonl", errors)
     decisions = _read_jsonl(run_dir / "model-decisions.jsonl", errors)
@@ -85,6 +113,11 @@ def _verify_run(
                 errors.append(f"{expected_arm}: usage/decision response hash mismatch at call {index}")
             if decision.get("role") != usage_row.get("role"):
                 errors.append(f"{expected_arm}: usage/decision role mismatch at call {index}")
+        if manifest.get("protocol_version") == "v2":
+            role = decision.get("role")
+            report = validate_role_output(role, content) if isinstance(role, str) else {"status": "failed", "errors": ["missing role"]}
+            if report["status"] != "passed":
+                errors.append(f"{expected_arm}: invalid v2 {role} decision at call {index}: {'; '.join(report['errors'])}")
 
     expected_model = str(manifest.get("model", "")).split("/", 1)[-1]
     for index, row in enumerate(usage):
@@ -113,34 +146,124 @@ def _verify_run(
 
     simulator = VendingSimulator(scenario, int(manifest.get("seed", 0)))
     business_role = "actor" if expected_arm == "theatre" else "control"
+    protocol = manifest.get("protocol_version", "v1")
     expected_calls: list[tuple[int, str]] = []
+    last_planner: dict[str, Any] | None = None
+
+    def decision_at(turn_index: int, role: str) -> dict[str, Any] | None:
+        candidates = [
+            item for item in decisions
+            if item.get("turn_index") == turn_index and item.get("role") == role
+        ]
+        if len(candidates) != 1:
+            return None
+        content = candidates[0].get("content")
+        return content if isinstance(content, dict) else None
+
+    def v2_schedule(turn_index: int, view: dict[str, Any], critic: dict[str, Any] | None = None) -> dict[str, Any]:
+        cadence = manifest["v2_cadence"]
+        critical_event = any(event.get("severity") == "critical" for event in view.get("recent_events", []))
+        strategic_due = turn_index % int(cadence["strategic_review_every_turns"]) == 0 or critical_event
+        consciousness_due = (
+            turn_index == 0
+            or turn_index % int(cadence["consciousness_every_turns"]) == 0
+            or isinstance(critic, dict) and critic.get("verdict") == "critical"
+        )
+        return {
+            "turn_index": turn_index,
+            "strategic_review_due": strategic_due,
+            "consciousness_due": consciousness_due,
+            "critical_simulator_event": critical_event,
+        }
+
     for expected_index, turn in enumerate(turns):
         turn_index = turn.get("turn_index")
         if turn_index != expected_index:
             errors.append(f"{expected_arm}: non-contiguous turn index at {expected_index}")
             continue
-        if expected_arm == "theatre":
-            view = simulator.public_view()
-            review = (
-                turn_index % int(manifest.get("theatre_review_every_turns", 1)) == 0
-                or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
-            )
-            if review:
-                expected_calls.extend(((turn_index, "critic"), (turn_index, "planner")))
-        expected_calls.append((turn_index, business_role))
-        candidates = [
-            item for item in decisions
-            if item.get("turn_index") == turn_index and item.get("role") == business_role
-        ]
-        if len(candidates) != 1:
-            errors.append(f"{expected_arm}: turn {turn_index} has {len(candidates)} business decisions")
-            continue
-        content = candidates[0].get("content")
-        actions = content.get("actions", []) if isinstance(content, dict) else []
-        if not isinstance(actions, list):
-            actions = []
+        view = simulator.public_view()
+        decision_audit = None
+        if protocol == "v2":
+            if expected_arm == "control":
+                expected_calls.append((turn_index, "control"))
+                content = decision_at(turn_index, "control")
+                schedule = v2_schedule(turn_index, view)
+                if content is None:
+                    errors.append(f"{expected_arm}: turn {turn_index} has no unique control decision")
+                    actions = []
+                else:
+                    try:
+                        actions = extract_actions("control", content)
+                    except ValueError as exc:
+                        errors.append(f"{expected_arm}: turn {turn_index} control contract failed: {exc}")
+                        actions = []
+                decision_audit = {
+                    "schema_version": 1,
+                    "status": "passed",
+                    "arm": "control",
+                    "schedule": schedule,
+                    "action_count": len(actions),
+                    "actions": actions,
+                }
+            else:
+                critic = decision_at(turn_index, "critic")
+                schedule = v2_schedule(turn_index, view, critic)
+                review = schedule["strategic_review_due"]
+                roles = ["critic"] if review else []
+                if review and schedule["consciousness_due"]:
+                    roles.append("consciousness")
+                if review:
+                    roles.append("planner")
+                roles.append("actor")
+                expected_calls.extend((turn_index, role) for role in roles)
+                if review:
+                    last_planner = decision_at(turn_index, "planner")
+                actor = decision_at(turn_index, "actor")
+                consciousness = decision_at(turn_index, "consciousness") if review else None
+                handoff = validate_theatre_handoff(
+                    critic,
+                    last_planner,
+                    actor,
+                    consciousness,
+                    review_required=review,
+                    consciousness_required=bool(review and schedule["consciousness_due"]),
+                )
+                if handoff["status"] != "passed":
+                    errors.append(f"{expected_arm}: turn {turn_index} handoff failed: {'; '.join(handoff['errors'])}")
+                    actions = []
+                else:
+                    try:
+                        actions = extract_actions("actor", actor)
+                    except ValueError as exc:
+                        errors.append(f"{expected_arm}: turn {turn_index} actor contract failed: {exc}")
+                        actions = []
+                decision_audit = {
+                    "schema_version": 1,
+                    "status": "passed",
+                    "arm": "theatre",
+                    "schedule": schedule,
+                    **{key: value for key, value in handoff.items() if key not in ("status", "errors")},
+                    "action_count": len(actions),
+                    "actions": actions,
+                }
+        else:
+            if expected_arm == "theatre":
+                review = (
+                    turn_index % int(manifest.get("theatre_review_every_turns", 1)) == 0
+                    or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
+                )
+                if review:
+                    expected_calls.extend(((turn_index, "critic"), (turn_index, "planner")))
+            expected_calls.append((turn_index, business_role))
+            content = decision_at(turn_index, business_role)
+            actions = content.get("actions", []) if isinstance(content, dict) else []
+            if not isinstance(actions, list):
+                actions = []
+
         day_before = simulator.state["day"]
         applied = simulator.apply_turn(actions)
+        if protocol == "v2" and turn.get("decision_audit") != decision_audit:
+            errors.append(f"{expected_arm}: turn {turn_index} decision audit mismatch")
         if turn.get("day_before") != day_before or turn.get("day_after") != simulator.state["day"]:
             errors.append(f"{expected_arm}: turn {turn_index} day boundary mismatch")
         if turn.get("accepted") != applied.accepted or turn.get("rejected") != applied.rejected:
@@ -151,15 +274,30 @@ def _verify_run(
     current_turn = len(turns)
     current_expected: list[tuple[int, str]] = []
     if not simulator.state["terminated"]:
-        if expected_arm == "theatre":
+        if protocol == "v2":
             view = simulator.public_view()
-            review = (
-                current_turn % int(manifest.get("theatre_review_every_turns", 1)) == 0
-                or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
-            )
-            if review:
-                current_expected.extend(((current_turn, "critic"), (current_turn, "planner")))
-        current_expected.append((current_turn, business_role))
+            if expected_arm == "control":
+                roles = ["control"]
+            else:
+                critic = decision_at(current_turn, "critic")
+                schedule = v2_schedule(current_turn, view, critic)
+                roles = ["critic"] if schedule["strategic_review_due"] else []
+                if schedule["strategic_review_due"] and schedule["consciousness_due"]:
+                    roles.append("consciousness")
+                if schedule["strategic_review_due"]:
+                    roles.append("planner")
+                roles.append("actor")
+            current_expected.extend((current_turn, role) for role in roles)
+        else:
+            if expected_arm == "theatre":
+                view = simulator.public_view()
+                review = (
+                    current_turn % int(manifest.get("theatre_review_every_turns", 1)) == 0
+                    or any(event.get("severity") == "critical" for event in view.get("recent_events", []))
+                )
+                if review:
+                    current_expected.extend(((current_turn, "critic"), (current_turn, "planner")))
+            current_expected.append((current_turn, business_role))
     actual_calls = [(item.get("turn_index"), item.get("role")) for item in decisions]
     if actual_calls[:len(expected_calls)] != expected_calls:
         errors.append(f"{expected_arm}: completed role cadence/order mismatch")
@@ -243,7 +381,22 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             run_results[arm] = read_json(run_dir / "result.json")
 
     if set(manifests) == {"control", "theatre"}:
-        for field in ("seed", "model", "thinking", "scenario_hash", "decision_period_days"):
+        parity_fields = ("seed", "model", "thinking", "scenario_hash", "decision_period_days")
+        if pair.get("protocol_version") == "v2":
+            parity_fields += (
+                "protocol_version",
+                "artifact_hashes",
+                "shared_corpus_hash",
+                "protocol_hash",
+                "action_budget",
+                "v2_cadence",
+                "usage_ledger_path",
+                "preregistration_sha256",
+                "source_commit",
+                "activation_receipt_sha256",
+                "inference_enabled",
+            )
+        for field in parity_fields:
             if manifests["control"].get(field) != manifests["theatre"].get(field):
                 errors.append(f"pair: manifest parity mismatch for {field}")
         if pair.get("seed") != manifests["control"].get("seed"):
@@ -254,6 +407,66 @@ def verify_pair(pair_dir: Path, ledger_path: Path | None = None) -> dict[str, An
             errors.append("pair: thinking differs from run manifests")
         if manifests["control"].get("prompt_hashes") != manifests["theatre"].get("prompt_hashes"):
             errors.append("pair: prompt hash parity mismatch")
+
+        if pair.get("protocol_version") == "v2":
+            try:
+                plan = seed_plan(int(pair.get("seed")))
+            except (TypeError, ValueError) as exc:
+                errors.append(f"pair: invalid preregistered seed: {exc}")
+            else:
+                if pair.get("first_arm") != plan["first_arm"]:
+                    errors.append("pair: first arm differs from preregistered order")
+                if pair.get("days") != plan["days"]:
+                    errors.append("pair: horizon differs from preregistration")
+                if pair.get("model") != plan["model"] or pair.get("thinking") != plan["thinking"]:
+                    errors.append("pair: model/thinking differs from preregistration")
+
+            prereg_path = pair_dir / "preregistration.json"
+            if not prereg_path.is_file():
+                errors.append("pair: missing frozen preregistration-v2.json")
+                prereg_sha = None
+            else:
+                prereg_sha = hashlib.sha256(prereg_path.read_bytes()).hexdigest()
+                if pair.get("preregistration_sha256") != prereg_sha:
+                    errors.append("pair: frozen preregistration hash mismatch")
+                if prereg_sha != hashlib.sha256(PREREGISTRATION.read_bytes()).hexdigest():
+                    errors.append("pair: frozen preregistration differs from published source")
+            live_audit = audit_preregistration()
+            if live_audit["status"] != "passed":
+                errors.append("pair: published v2 preregistration audit failed")
+            elif pair.get("artifact_hashes") != live_audit["observed_hashes"]:
+                errors.append("pair: frozen artifact hashes differ from published source")
+            for arm in ("control", "theatre"):
+                manifest = manifests[arm]
+                if manifest.get("pair_id") != pair.get("pair_id"):
+                    errors.append(f"pair: {arm} manifest pair identity mismatch")
+                if manifest.get("preregistration_sha256") != prereg_sha:
+                    errors.append(f"pair: {arm} manifest preregistration hash mismatch")
+                if manifest.get("artifact_hashes") != pair.get("artifact_hashes"):
+                    errors.append(f"pair: {arm} manifest artifact hashes differ from pair")
+                if manifest.get("usage_ledger_path") != str(ledger_path.resolve()):
+                    errors.append(f"pair: {arm} manifest usage ledger is not the run-root ledger")
+
+            enabled = pair.get("inference_enabled") is True
+            activation_path = pair_dir / "activation.json"
+            if enabled:
+                if not activation_path.is_file():
+                    errors.append("pair: inference enabled without activation receipt")
+                else:
+                    activation_sha = hashlib.sha256(activation_path.read_bytes()).hexdigest()
+                    activation = read_json(activation_path)
+                    if pair.get("activation_receipt_sha256") != activation_sha:
+                        errors.append("pair: activation receipt hash mismatch")
+                    if activation.get("pair_id") != pair.get("pair_id"):
+                        errors.append("pair: activation receipt pair identity mismatch")
+                    if activation.get("source_commit") != pair.get("source_commit"):
+                        errors.append("pair: activation source commit mismatch")
+                    if activation.get("preregistration_sha256") != prereg_sha:
+                        errors.append("pair: activation preregistration hash mismatch")
+                    if activation.get("artifact_hashes") != pair.get("artifact_hashes"):
+                        errors.append("pair: activation artifact hashes mismatch")
+            elif activation_path.exists() or pair.get("activation_receipt_sha256") is not None:
+                errors.append("pair: offline pair contains an activation receipt")
     if set(scenarios) == {"control", "theatre"}:
         if scenarios["control"] != scenarios["theatre"]:
             errors.append("pair: scenario snapshots differ")
