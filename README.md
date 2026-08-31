@@ -79,22 +79,36 @@ not the official five-seed benchmark verdict.
 An official result still requires the frozen manifest, five pre-registered
 paired seeds, full logs, replay verification, and the planned paired analysis.
 
-## Theatre v2 pre-registration
+## Theatre v2 autonomous experiment
 
-The autonomous v2 treatment is specified and machine-auditable, but **no v2
-inference has started**. It gives the single-agent control and Theatre the same
-four functional responsibilities, the same frozen domain corpus, and the same
-visible 14-action contract; only cognitive organization differs. Theatre adds
-an autonomous Consciência role, while control carries the same strategic-
-challenge checklist inside its combined response.
+The autonomous v2 treatment is pre-registered, executable, and still has **no
+v2 inference or economic result**. It gives the single-agent control and
+Theatre the same four functional responsibilities, frozen evidence, and visible
+14-action contract; only cognitive organization differs. Theatre routes
+Crítico → optional Consciência → Roteirista → Personagem on scheduled reviews,
+while control carries the same responsibilities and schedule flags inside one
+combined response.
 
 ```bash
-PYTHONPATH=src python -m theatre_business_bench.cli audit-v2-preregistration
+PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v2-preregistration
+
+# Run only from a clean main checkout after this executor is published.
+run_root=/absolute/durable/path/theatre-business-bench-v2
+PYTHONPATH=src python3 -m theatre_business_bench.cli create-pair \
+  --protocol v2 --seed 2201 --run-root "$run_root"
+source_commit=$(git rev-parse HEAD)
+PYTHONPATH=src python3 -m theatre_business_bench.cli activate-v2-pair \
+  --pair "$run_root/pairs/<pair-id>" --source-commit "$source_commit"
+THEATRE_PAIR_DIR="$run_root/pairs/<pair-id>" ./scripts/run-v2-batch.sh
 ```
 
-The command recomputes every frozen artifact hash and rejects asymmetry,
-internet/human intervention, seed drift, or an incomplete pre-registration
-before any future runner may start. See
+Creation is offline-only: `pair-batch` cannot make a model call until activation
+binds an untouched pair to the exact clean commit currently published at
+`origin/main`. The shared v2 shell lock serializes provider calls across all
+official seeds. Every model response is contract-checked before simulator
+execution; failed structure pauses loud as evidence. `verify-pair` independently
+reconstructs role order, handoffs, decision audits, actions, replay hashes,
+provider usage, and the run-root ledger before any resume. See
 [`docs/EXPERIMENT_PROTOCOL_V2.md`](docs/EXPERIMENT_PROTOCOL_V2.md) and
 [`preregistration/v2.json`](preregistration/v2.json).
 

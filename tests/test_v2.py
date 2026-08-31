@@ -51,7 +51,10 @@ class V2ProtocolTests(unittest.TestCase):
             "correction": {"required": False, "required_action_types": [], "verification": []},
         })
         self.assertEqual(report["status"], "failed")
-        self.assertEqual(len(report["errors"]), 3)
+        self.assertTrue(any("required must be true" in error for error in report["errors"]))
+        self.assertTrue(any("id must be non-empty" in error for error in report["errors"]))
+        self.assertTrue(any("allowed-action list" in error for error in report["errors"]))
+        self.assertTrue(any("verification" in error for error in report["errors"]))
 
     def test_actor_actions_are_plan_bound_and_capacity_checked(self) -> None:
         payload = {
@@ -79,6 +82,25 @@ class V2ProtocolTests(unittest.TestCase):
         })
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("three alternative" in error for error in report["errors"]))
+
+    def test_correction_and_binding_must_be_executable_structures(self) -> None:
+        critic = validate_role_output("critic", {
+            "verdict": "correction_required",
+            "correction": {
+                "required": True,
+                "id": "C1",
+                "required_action_types": ["not_an_action"],
+                "verification": "not a list",
+            },
+        })
+        self.assertEqual(critic["status"], "failed")
+        planner = validate_role_output("planner", {
+            "capital_budget": {},
+            "action_queue": [{"id": "P1", "action_type": "collect_cash"}],
+            "correction_binding": {"correction_id": "C1", "queue_item_ids": 7},
+        })
+        self.assertEqual(planner["status"], "failed")
+        self.assertTrue(any("queue_item_ids" in error for error in planner["errors"]))
 
     def test_theatre_handoff_confronts_correction_plan_and_execution(self) -> None:
         critic = {

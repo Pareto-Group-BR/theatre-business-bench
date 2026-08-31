@@ -29,6 +29,31 @@ One persistent GPT-5.6 Sol session receives the state and combines diagnosis, pl
 
 The Personagem runs at every three-day decision boundary. Crítico and Roteirista run at the start, every four simulated weeks, and after critical events.
 
+### Autonomous v2 profile
+
+V2 preserves the v1 pilot as immutable history and freezes its own five seeds,
+arm order, scenario, corpus, protocol, five prompts, cadence, model, thinking,
+and action budget in `preregistration/v2.json`. Control and Theatre see the
+same public state and schedule flags. Control performs all four responsibilities
+in one response; Theatre performs strategic reviews in the causal order Crítico
+→ Consciência when due → Roteirista → Personagem, with only Personagem allowed
+to submit actions.
+
+Pairs are created offline with frozen copies and a run-root provider ledger.
+Activation accepts only an untouched pair and the exact clean commit currently
+published at `origin/main`; its hashed receipt is required by both manifests at
+every step. `scripts/run-v2-batch.sh` adds one inherited global lock across all
+official seeds, while `step_pair` balances and serializes the two arms within a
+pair.
+
+The runtime validates each role response before simulator execution. It
+confronts correction requirements, plan ids and action types, execution
+capacity, scheduled Consciência presence, and the final Personagem handoff. A
+contract failure is preserved and stops loud. Each successful turn persists a
+deterministic `decision_audit`; the verifier reconstructs cadence, handoffs,
+actions, state, activation, frozen artifact hashes, and provider-ledger parity
+without invoking a model.
+
 ## Subscription transport
 
 The runner invokes `openclaw agent` through the Gateway with:
