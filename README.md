@@ -179,8 +179,14 @@ THEATRE_COMPLETED_RUN_ID=<auto-continuation-completion> \
   ./scripts/reconcile-v3-gateway-restart.sh
 ```
 
-The wrapper holds the same global lock as official inference. The command first
-persists a prepared receipt, resumes safely after interruption at any write
+The wrapper accepts either a trajectory `model.completed` or the observed
+OpenClaw terminal-only shape when the continuation ends with
+`session.ended/status=success`. In the latter case it requires the canonical
+session assistant row to bind the same trace, thread, turn, parent chain,
+provider, model, response, stop reason, timestamps, and provider-reported
+usage; a missing or altered binding or any non-success terminal status fails
+closed. The wrapper holds the same global lock as official inference. The
+command first persists a prepared receipt, resumes safely after interruption at any write
 boundary, and is byte-idempotent for the same source bytes and ids. It charges the
 completed continuation, records the interrupted id, adds zero accepted model
 decisions and zero simulator turns, and leaves the seed `failed_contract` for
