@@ -31,6 +31,205 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _file_record(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"sha256": None, "bytes": 0, "rows": 0}
+    raw = path.read_bytes()
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "rows": len(raw.splitlines()),
+    }
+
+
+def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
+    raw = "".join(
+        json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _restart_protected_records(
+    pair_dir: Path, run_dir: Path, other_run_dir: Path
+) -> dict[str, dict[str, Any]]:
+    paths = {
+        "run/manifest.json": run_dir / "manifest.json",
+        "run/scenario.json": run_dir / "scenario.json",
+        "run/state.json": run_dir / "state.json",
+        "run/role-memory.json": run_dir / "role-memory.json",
+        "run/model-decisions.jsonl": run_dir / "model-decisions.jsonl",
+        "run/role-invocations.jsonl": run_dir / "role-invocations.jsonl",
+        "run/turns.jsonl": run_dir / "turns.jsonl",
+        "run/result.json": run_dir / "result.json",
+        "other/manifest.json": other_run_dir / "manifest.json",
+        "other/scenario.json": other_run_dir / "scenario.json",
+        "other/state.json": other_run_dir / "state.json",
+        "other/flow.json": other_run_dir / "flow.json",
+        "other/role-memory.json": other_run_dir / "role-memory.json",
+        "other/usage.jsonl": other_run_dir / "usage.jsonl",
+        "other/model-decisions.jsonl": other_run_dir / "model-decisions.jsonl",
+        "other/model-failures.jsonl": other_run_dir / "model-failures.jsonl",
+        "other/role-invocations.jsonl": other_run_dir / "role-invocations.jsonl",
+        "other/call-journal.jsonl": other_run_dir / "call-journal.jsonl",
+        "other/turns.jsonl": other_run_dir / "turns.jsonl",
+        "other/result.json": other_run_dir / "result.json",
+        "pair/activation.json": pair_dir / "activation.json",
+        "pair/preregistration.json": pair_dir / "preregistration.json",
+        "pair/result.json": pair_dir / "result.json",
+    }
+    return {name: _file_record(path) for name, path in paths.items()}
+
+
+def _verify_gateway_restart_transaction(
+    run_dir: Path, manifest: dict[str, Any], receipt: dict[str, Any]
+) -> list[str]:
+    arm = str(manifest.get("arm"))
+    errors: list[str] = []
+    transaction = receipt.get("transaction")
+    final = receipt.get("final")
+    if not isinstance(transaction, dict) or not isinstance(final, dict):
+        return [f"{arm}: gateway-restart receipt lacks its completed transaction"]
+    pair_dir = Path(manifest["pair_dir"]).resolve()
+    pair = read_json(pair_dir / "pair.json")
+    other_arm = "theatre" if arm == "control" else "control"
+    other_run_dir = Path(pair[f"{other_arm}_run"]).resolve()
+    ledger_path = Path(transaction.get("ledger_path", "")).resolve()
+    expected_ledger_path = Path(manifest["usage_ledger_path"]).resolve()
+    if ledger_path != expected_ledger_path:
+        return [f"{arm}: gateway-restart transaction targets the wrong usage ledger"]
+    paths = {
+        "usage": run_dir / "usage.jsonl",
+        "failures": run_dir / "model-failures.jsonl",
+        "ledger": ledger_path,
+        "journal": run_dir / "call-journal.jsonl",
+    }
+    source = transaction.get("source", {})
+    target = transaction.get("target", {})
+    rows = transaction.get("rows", {})
+    if set(rows) != set(paths) or set(source.get("files", {})) != set(paths):
+        return [f"{arm}: gateway-restart transaction file set mismatch"]
+    if set(target.get("files", {})) != set(paths):
+        return [f"{arm}: gateway-restart transaction target set mismatch"]
+    expected_transaction_id = stable_hash({
+        "pair_id": receipt.get("pair_id"),
+        "run_id": receipt.get("run_id"),
+        "attempt_id": receipt.get("attempt_id"),
+        "interrupted_gateway_run_id": receipt.get("interrupted_gateway_run_id"),
+        "completed_gateway_run_id": receipt.get("completed_gateway_run_id"),
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    })
+    if transaction.get("transaction_id") != expected_transaction_id:
+        errors.append(f"{arm}: gateway-restart transaction id mismatch")
+    usage_row = rows.get("usage", [{}])[-1] if rows.get("usage") else {}
+    failure_row = rows.get("failures", [{}])[-1] if rows.get("failures") else {}
+    ledger_row = rows.get("ledger", [{}])[-1] if rows.get("ledger") else {}
+    journal_row = rows.get("journal", [{}])[-1] if rows.get("journal") else {}
+    identity = {
+        "attempt_id": receipt.get("attempt_id"),
+        "role": receipt.get("role"),
+        "turn_index": receipt.get("turn_index"),
+    }
+    if (
+        any(usage_row.get(key) != value for key, value in identity.items())
+        or any(failure_row.get(key) != value for key, value in identity.items())
+        or any(journal_row.get(key) != value for key, value in identity.items())
+        or usage_row.get("usage") != receipt.get("provider_usage")
+        or usage_row.get("response_hash") != receipt.get("response_hash")
+        or failure_row.get("response_hash") != receipt.get("response_hash")
+        or failure_row.get("failure_kind") != "gateway_restart_recovery"
+        or ledger_row != usage_row
+        or journal_row.get("event") != "completed"
+        or journal_row.get("outcome") != "gateway_restart_recovery_terminal"
+    ):
+        errors.append(f"{arm}: gateway-restart transaction rows exceed the receipt")
+    for name, path in paths.items():
+        target_rows = rows.get(name)
+        source_record = source["files"][name]
+        if (
+            not isinstance(target_rows, list)
+            or _jsonl_sha256(target_rows) != target["files"][name]
+            or _file_record(path).get("sha256") != target["files"][name]
+            or len(target_rows) != int(source_record.get("rows", -1)) + 1
+        ):
+            errors.append(f"{arm}: gateway-restart {name} transaction hash mismatch")
+            continue
+        if source_record.get("sha256") is None:
+            if target_rows[:-1]:
+                errors.append(f"{arm}: gateway-restart {name} source absence mismatch")
+        elif _jsonl_sha256(target_rows[:-1]) != source_record.get("sha256"):
+            errors.append(f"{arm}: gateway-restart {name} source rows were not preserved")
+
+    flow = read_json(run_dir / "flow.json")
+    pair_path = pair_dir / "pair.json"
+    if (
+        _file_record(run_dir / "flow.json").get("sha256") != target.get("flow")
+        or _file_record(pair_path).get("sha256") != target.get("pair")
+    ):
+        errors.append(f"{arm}: gateway-restart terminal state hash mismatch")
+    source_flow = dict(flow)
+    for key in ("status", "updated_at", "contract_failure"):
+        source_flow.pop(key, None)
+    source_flow.update(source.get("flow_transition_fields", {}))
+    source_pair = dict(pair)
+    for key in ("status", "last_arm", "last_result", "updated_at"):
+        source_pair.pop(key, None)
+    source_pair.update(source.get("pair_transition_fields", {}))
+    def json_sha(value: Any) -> str:
+        return hashlib.sha256(
+            (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+        ).hexdigest()
+
+    if json_sha(source_flow) != source.get("flow", {}).get("sha256"):
+        errors.append(f"{arm}: gateway-restart source flow cannot be reconstructed")
+    if json_sha(source_pair) != source.get("pair", {}).get("sha256"):
+        errors.append(f"{arm}: gateway-restart source pair cannot be reconstructed")
+    reason = (
+        "gateway restarted during the frozen repair; auto-continuation "
+        "preserved and charged but not applied"
+    )
+    expected_flow_transition = {
+        "status": "failed_contract",
+        "updated_at": receipt.get("reconciled_at"),
+        "contract_failure": {"phase": receipt.get("role"), "message": reason},
+    }
+    expected_pair_transition = {
+        "status": "failed_contract",
+        "last_arm": arm,
+        "last_result": {
+            "status": "failed_contract",
+            "reason": reason,
+            "run_dir": str(run_dir),
+            "provider_usage_charged": receipt.get("provider_usage"),
+            "simulator_turns_added": 0,
+        },
+        "updated_at": receipt.get("reconciled_at"),
+    }
+    if (
+        transaction.get("flow_transition") != expected_flow_transition
+        or transaction.get("pair_transition") != expected_pair_transition
+    ):
+        errors.append(f"{arm}: gateway-restart transaction state transition mismatch")
+    expected_flow = dict(source_flow)
+    expected_flow.update(expected_flow_transition)
+    expected_pair = dict(source_pair)
+    expected_pair.update(expected_pair_transition)
+    if json_sha(expected_flow) != target.get("flow") or json_sha(expected_pair) != target.get("pair"):
+        errors.append(f"{arm}: gateway-restart transaction target state mismatch")
+    protected = _restart_protected_records(pair_dir, run_dir, other_run_dir)
+    if protected != source.get("protected_artifacts"):
+        errors.append(f"{arm}: gateway-restart reconciliation changed protected evidence")
+    observed_final = {
+        "files": {name: _file_record(path) for name, path in paths.items()},
+        "flow": _file_record(run_dir / "flow.json"),
+        "pair": _file_record(pair_path),
+        "protected_artifacts": protected,
+    }
+    if observed_final != final:
+        errors.append(f"{arm}: gateway-restart final transaction receipt mismatch")
+    return errors
+
+
 def _read_jsonl(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -352,6 +551,10 @@ def _verify_run(
                 )
                 if not receipt_consistent:
                     errors.append(f"{expected_arm}: gateway-restart reconciliation receipt is inconsistent")
+                else:
+                    errors.extend(
+                        _verify_gateway_restart_transaction(run_dir, manifest, receipt)
+                    )
                 for path_key, hash_key in (
                     ("trajectory_path", "trajectory_sha256"),
                     ("session_log_path", "session_log_sha256"),

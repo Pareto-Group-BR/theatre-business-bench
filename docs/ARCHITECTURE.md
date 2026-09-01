@@ -96,6 +96,13 @@ No returned action is applied and the repair cannot be retried. The receipt
 binds both gateway run ids, both source-file hashes, the completed event, the
 three exact session messages, provider usage and the zero-turn/zero-decision
 claim; `verify-pair` confronts those bindings offline.
+The transition uses the same global lock as every official runner and persists
+a prepared intent before changing any ledger. Each subsequent write accepts
+only the exact source or exact planned target hash, so a restart of the
+reconciler resumes without duplicate usage or partial evidence. Final
+verification reconstructs the source rows and state and proves that simulator,
+accepted decisions, the other arm, activation, and pre-registration were not
+changed.
 
 ## Subscription transport
 

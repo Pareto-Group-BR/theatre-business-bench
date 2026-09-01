@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -87,6 +88,20 @@ def result(session_key: str, content: dict, ordinal: int) -> ModelResult:
 
 
 class V3ExecutorTests(unittest.TestCase):
+    @contextmanager
+    def _official_lock(self, root: Path):
+        runtime = root / ".runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(runtime / "official-inference.lock", os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            with patch.dict(os.environ, {
+                "THEATRE_OFFICIAL_LOCK_FD": str(descriptor),
+                "THEATRE_RUNTIME_DIR": str(runtime),
+            }):
+                yield
+        finally:
+            os.close(descriptor)
+
     def _activated(self, root: Path, seed: int = 2301) -> Path:
         pair = create_pair(seed=seed, run_root=root, protocol="v3")
         with patch("theatre_business_bench.v3._published_source_identity"):
@@ -385,12 +400,49 @@ class V3ExecutorTests(unittest.TestCase):
                 "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
             )
 
-            first = reconcile_openclaw_v3_gateway_restart(
-                pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
-            )
-            second = reconcile_openclaw_v3_gateway_restart(
-                pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
-            )
+            from theatre_business_bench import evidence
+
+            original_atomic_json = evidence.atomic_json
+            interrupted_once = False
+
+            def interrupt_before_pair_commit(path: Path, value: dict) -> None:
+                nonlocal interrupted_once
+                if Path(path) == pair_dir / "pair.json" and not interrupted_once:
+                    interrupted_once = True
+                    raise OSError("simulated restart during reconciliation")
+                original_atomic_json(path, value)
+
+            with self._official_lock(root):
+                with (
+                    patch.object(evidence, "atomic_json", new=interrupt_before_pair_commit),
+                    self.assertRaises(OSError),
+                ):
+                    reconcile_openclaw_v3_gateway_restart(
+                        pair_dir, "theatre", trajectory, session_log,
+                        interrupted_id, completed_id,
+                    )
+                prepared = read_json(theatre / "gateway-restart-reconciliation.json")
+                self.assertEqual(prepared["status"], "prepared_gateway_restart_reconciliation")
+                first = reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
+                )
+                committed_paths = [
+                    theatre / "usage.jsonl",
+                    theatre / "model-failures.jsonl",
+                    theatre / "call-journal.jsonl",
+                    theatre / "flow.json",
+                    theatre / "gateway-restart-reconciliation.json",
+                    pair_dir / "pair.json",
+                    Path(read_json(theatre / "manifest.json")["usage_ledger_path"]),
+                ]
+                committed_bytes = {str(path): path.read_bytes() for path in committed_paths}
+                second = reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
+                )
+                self.assertEqual(
+                    committed_bytes,
+                    {str(path): path.read_bytes() for path in committed_paths},
+                )
             self.assertEqual(first, second)
             self.assertEqual(first["status"], "reconciled_failed_contract")
             self.assertEqual(first["provider_usage"]["total"], 27)
@@ -440,10 +492,11 @@ class V3ExecutorTests(unittest.TestCase):
             session_log = root / "session.jsonl"
             trajectory.write_text("", encoding="utf-8")
             session_log.write_text("", encoding="utf-8")
-            with self.assertRaises(V3ContractError):
-                reconcile_openclaw_v3_gateway_restart(
-                    pair_dir, "theatre", trajectory, session_log, "interrupted", "completed"
-                )
+            with self._official_lock(root):
+                with self.assertRaises(V3ContractError):
+                    reconcile_openclaw_v3_gateway_restart(
+                        pair_dir, "theatre", trajectory, session_log, "interrupted", "completed"
+                    )
             self.assertEqual(len((theatre / "call-journal.jsonl").read_text().splitlines()), 1)
 
     def test_official_pair_batch_requires_canonical_lock_descriptor(self) -> None:
@@ -460,6 +513,16 @@ class V3ExecutorTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     pair_batch(args)
             step.assert_not_called()
+
+    def test_gateway_restart_reconciliation_requires_canonical_lock_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(V3ContractError, "canonical global-lock wrapper"):
+                    reconcile_openclaw_v3_gateway_restart(
+                        root / "pair", "control", root / "trajectory.jsonl",
+                        root / "session.jsonl", "interrupted", "completed",
+                    )
 
     def test_partial_activation_state_cannot_infer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

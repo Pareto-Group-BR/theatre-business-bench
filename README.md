@@ -170,16 +170,18 @@ repair prompt, the explicit restart message, the returned bytes and provider
 usage, then terminally preserves the pair without applying a business action:
 
 ```bash
-PYTHONPATH=src python3 -m theatre_business_bench.cli \
-  reconcile-openclaw-v3-gateway-restart \
-  --pair /absolute/run-root/pairs/<pair-id> --arm control \
-  --trajectory /absolute/openclaw/session.trajectory.jsonl \
-  --session-log /absolute/openclaw/session.jsonl \
-  --interrupted-gateway-run-id <started-without-completion> \
-  --completed-gateway-run-id <auto-continuation-completion>
+THEATRE_PAIR_DIR=/absolute/run-root/pairs/<pair-id> \
+THEATRE_ARM=control \
+THEATRE_TRAJECTORY=/absolute/openclaw/session.trajectory.jsonl \
+THEATRE_SESSION_LOG=/absolute/openclaw/session.jsonl \
+THEATRE_INTERRUPTED_RUN_ID=<started-without-completion> \
+THEATRE_COMPLETED_RUN_ID=<auto-continuation-completion> \
+  ./scripts/reconcile-v3-gateway-restart.sh
 ```
 
-The command is idempotent for the same source bytes and ids. It charges the
+The wrapper holds the same global lock as official inference. The command first
+persists a prepared receipt, resumes safely after interruption at any write
+boundary, and is byte-idempotent for the same source bytes and ids. It charges the
 completed continuation, records the interrupted id, adds zero accepted model
 decisions and zero simulator turns, and leaves the seed `failed_contract` for
 campaign reliability analysis. It never authorizes retrying that repair.

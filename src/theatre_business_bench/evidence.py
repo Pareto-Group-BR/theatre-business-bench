@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,8 +41,88 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _atomic_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     text = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
     temporary = path.with_name(path.name + ".reconcile-tmp")
-    temporary.write_text(text, encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _file_record(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"sha256": None, "bytes": 0, "rows": 0}
+    raw = path.read_bytes()
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "rows": len(raw.splitlines()),
+    }
+
+
+def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
+    raw = "".join(
+        json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _json_sha256(value: Any) -> str:
+    raw = (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _require_official_lock() -> None:
+    raw_fd = os.environ.get("THEATRE_OFFICIAL_LOCK_FD")
+    try:
+        if raw_fd is None:
+            raise ValueError("missing")
+        fd = int(raw_fd)
+        held = os.fstat(fd)
+        runtime_dir = Path(os.environ.get("THEATRE_RUNTIME_DIR", ".runtime")).resolve()
+        expected = os.stat(runtime_dir / "official-inference.lock")
+        if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ValueError("wrong descriptor")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ValueError, OSError) as exc:
+        raise V3ContractError(
+            "v3 gateway-restart reconciliation requires the canonical global-lock wrapper"
+        ) from exc
+
+
+def _restart_protected_artifacts(
+    pair_dir: Path, run_dir: Path, other_run_dir: Path
+) -> dict[str, dict[str, Any]]:
+    paths = {
+        "run/manifest.json": run_dir / "manifest.json",
+        "run/scenario.json": run_dir / "scenario.json",
+        "run/state.json": run_dir / "state.json",
+        "run/role-memory.json": run_dir / "role-memory.json",
+        "run/model-decisions.jsonl": run_dir / "model-decisions.jsonl",
+        "run/role-invocations.jsonl": run_dir / "role-invocations.jsonl",
+        "run/turns.jsonl": run_dir / "turns.jsonl",
+        "run/result.json": run_dir / "result.json",
+        "other/manifest.json": other_run_dir / "manifest.json",
+        "other/scenario.json": other_run_dir / "scenario.json",
+        "other/state.json": other_run_dir / "state.json",
+        "other/flow.json": other_run_dir / "flow.json",
+        "other/role-memory.json": other_run_dir / "role-memory.json",
+        "other/usage.jsonl": other_run_dir / "usage.jsonl",
+        "other/model-decisions.jsonl": other_run_dir / "model-decisions.jsonl",
+        "other/model-failures.jsonl": other_run_dir / "model-failures.jsonl",
+        "other/role-invocations.jsonl": other_run_dir / "role-invocations.jsonl",
+        "other/call-journal.jsonl": other_run_dir / "call-journal.jsonl",
+        "other/turns.jsonl": other_run_dir / "turns.jsonl",
+        "other/result.json": other_run_dir / "result.json",
+        "pair/activation.json": pair_dir / "activation.json",
+        "pair/preregistration.json": pair_dir / "preregistration.json",
+        "pair/result.json": pair_dir / "result.json",
+    }
+    return {name: _file_record(path) for name, path in paths.items()}
 
 
 def _trajectory_events(
@@ -292,6 +375,175 @@ def _message_text(row: dict[str, Any]) -> str | None:
     return "".join(parts)
 
 
+def _finish_v3_restart_reconciliation(
+    pair_dir: Path, run_dir: Path, other_run_dir: Path, receipt_path: Path,
+    receipt: dict[str, Any], *, resume: bool = True,
+) -> dict[str, Any]:
+    transaction = receipt.get("transaction")
+    if not isinstance(transaction, dict):
+        raise V3ContractError("gateway-restart receipt lacks its durable transaction")
+    source = transaction.get("source", {})
+    target = transaction.get("target", {})
+    rows = transaction.get("rows", {})
+    ledger_path = Path(transaction.get("ledger_path", "")).resolve()
+    expected_ledger_path = Path(
+        read_json(run_dir / "manifest.json")["usage_ledger_path"]
+    ).resolve()
+    if ledger_path != expected_ledger_path:
+        raise V3ContractError("gateway-restart transaction targets the wrong usage ledger")
+    paths = {
+        "usage": run_dir / "usage.jsonl",
+        "failures": run_dir / "model-failures.jsonl",
+        "ledger": ledger_path,
+        "journal": run_dir / "call-journal.jsonl",
+    }
+    expected_row_keys = {"usage", "failures", "ledger", "journal"}
+    if set(rows) != expected_row_keys or set(source.get("files", {})) != expected_row_keys:
+        raise V3ContractError("gateway-restart transaction has an invalid file set")
+    if set(target.get("files", {})) != expected_row_keys:
+        raise V3ContractError("gateway-restart transaction target set is invalid")
+    usage_row = rows.get("usage", [])[-1] if rows.get("usage") else {}
+    failure_row = rows.get("failures", [])[-1] if rows.get("failures") else {}
+    ledger_row = rows.get("ledger", [])[-1] if rows.get("ledger") else {}
+    journal_row = rows.get("journal", [])[-1] if rows.get("journal") else {}
+    expected_identity = {
+        "attempt_id": receipt.get("attempt_id"),
+        "role": receipt.get("role"),
+        "turn_index": receipt.get("turn_index"),
+    }
+    if (
+        any(usage_row.get(key) != value for key, value in expected_identity.items())
+        or any(failure_row.get(key) != value for key, value in expected_identity.items())
+        or any(journal_row.get(key) != value for key, value in expected_identity.items())
+        or usage_row.get("usage") != receipt.get("provider_usage")
+        or usage_row.get("response_hash") != receipt.get("response_hash")
+        or failure_row.get("response_hash") != receipt.get("response_hash")
+        or failure_row.get("failure_kind") != "gateway_restart_recovery"
+        or ledger_row != usage_row
+        or journal_row.get("event") != "completed"
+        or journal_row.get("outcome") != "gateway_restart_recovery_terminal"
+        or journal_row.get("gateway_run_id") != receipt.get("completed_gateway_run_id")
+        or journal_row.get("interrupted_gateway_run_id") != receipt.get("interrupted_gateway_run_id")
+    ):
+        raise V3ContractError("gateway-restart transaction rows exceed the forensic receipt")
+    for name in expected_row_keys:
+        source_record = source["files"][name]
+        target_rows = rows[name]
+        if len(target_rows) != int(source_record.get("rows", -1)) + 1:
+            raise V3ContractError(f"gateway-restart {name} does not append exactly one row")
+        prefix_sha = _jsonl_sha256(target_rows[:-1])
+        if source_record.get("sha256") is None:
+            if target_rows[:-1]:
+                raise V3ContractError(f"gateway-restart {name} source absence is inconsistent")
+        elif prefix_sha != source_record.get("sha256"):
+            raise V3ContractError(f"gateway-restart {name} target does not preserve source rows")
+    expected_transaction_id = stable_hash({
+        "pair_id": receipt.get("pair_id"),
+        "run_id": receipt.get("run_id"),
+        "attempt_id": receipt.get("attempt_id"),
+        "interrupted_gateway_run_id": receipt.get("interrupted_gateway_run_id"),
+        "completed_gateway_run_id": receipt.get("completed_gateway_run_id"),
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    })
+    if transaction.get("transaction_id") != expected_transaction_id:
+        raise V3ContractError("gateway-restart transaction id does not bind its source evidence")
+    for name, path in paths.items():
+        target_rows = rows[name]
+        if not isinstance(target_rows, list) or _jsonl_sha256(target_rows) != target["files"][name]:
+            raise V3ContractError(f"gateway-restart {name} target hash is invalid")
+        current = _file_record(path)["sha256"]
+        if current == source["files"][name]["sha256"]:
+            if not resume:
+                raise V3ContractError(
+                    f"completed gateway-restart reconciliation left {name} uncommitted"
+                )
+            _atomic_jsonl(path, target_rows)
+        elif current != target["files"][name]:
+            raise V3ContractError(
+                f"gateway-restart {name} changed outside the prepared transaction"
+            )
+
+    reason = (
+        "gateway restarted during the frozen repair; auto-continuation "
+        "preserved and charged but not applied"
+    )
+    expected_flow_transition = {
+        "status": "failed_contract",
+        "updated_at": receipt.get("reconciled_at"),
+        "contract_failure": {"phase": receipt.get("role"), "message": reason},
+    }
+    expected_pair_transition = {
+        "status": "failed_contract",
+        "last_arm": receipt.get("arm"),
+        "last_result": {
+            "status": "failed_contract",
+            "reason": reason,
+            "run_dir": str(run_dir),
+            "provider_usage_charged": receipt.get("provider_usage"),
+            "simulator_turns_added": 0,
+        },
+        "updated_at": receipt.get("reconciled_at"),
+    }
+    if (
+        transaction.get("flow_transition") != expected_flow_transition
+        or transaction.get("pair_transition") != expected_pair_transition
+    ):
+        raise V3ContractError("gateway-restart transaction exceeds its allowed state transition")
+
+    flow_path = run_dir / "flow.json"
+    flow = read_json(flow_path)
+    flow_sha = _file_record(flow_path)["sha256"]
+    if flow_sha == source["flow"]["sha256"]:
+        if not resume:
+            raise V3ContractError(
+                "completed gateway-restart reconciliation left run flow uncommitted"
+            )
+        flow.update(deepcopy(expected_flow_transition))
+        atomic_json(flow_path, flow)
+    elif flow_sha != target["flow"]:
+        raise V3ContractError("run flow changed outside the prepared transaction")
+
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    pair_sha = _file_record(pair_path)["sha256"]
+    if pair_sha == source["pair"]["sha256"]:
+        if not resume:
+            raise V3ContractError(
+                "completed gateway-restart reconciliation left pair state uncommitted"
+            )
+        pair.update(deepcopy(expected_pair_transition))
+        atomic_json(pair_path, pair)
+    elif pair_sha != target["pair"]:
+        raise V3ContractError("pair state changed outside the prepared transaction")
+
+    protected = _restart_protected_artifacts(pair_dir, run_dir, other_run_dir)
+    if protected != source.get("protected_artifacts"):
+        raise V3ContractError("protected evidence changed during gateway-restart reconciliation")
+    final = {
+        "files": {name: _file_record(path) for name, path in paths.items()},
+        "flow": _file_record(flow_path),
+        "pair": _file_record(pair_path),
+        "protected_artifacts": protected,
+    }
+    if any(final["files"][name]["sha256"] != target["files"][name] for name in paths):
+        raise V3ContractError("gateway-restart transaction did not persist its exact ledgers")
+    if final["flow"]["sha256"] != target["flow"] or final["pair"]["sha256"] != target["pair"]:
+        raise V3ContractError("gateway-restart transaction did not persist its exact terminal state")
+
+    if not resume:
+        if receipt.get("status") != "reconciled_failed_contract" or receipt.get("final") != final:
+            raise V3ContractError(
+                "completed gateway-restart reconciliation receipt was modified"
+            )
+        return receipt
+    completed_receipt = deepcopy(receipt)
+    completed_receipt["status"] = "reconciled_failed_contract"
+    completed_receipt["final"] = final
+    atomic_json(receipt_path, completed_receipt)
+    return completed_receipt
+
+
 def reconcile_openclaw_v3_gateway_restart(
     pair_dir: Path,
     arm: str,
@@ -309,6 +561,7 @@ def reconcile_openclaw_v3_gateway_restart(
     and therefore must be imported as terminal evidence instead of retried or
     discarded.
     """
+    _require_official_lock()
     pair_dir = pair_dir.resolve()
     trajectory_path = trajectory_path.resolve()
     session_log_path = session_log_path.resolve()
@@ -322,6 +575,8 @@ def reconcile_openclaw_v3_gateway_restart(
     if pair.get("protocol_version") != "v3" or pair.get("official") is not True:
         raise V3ContractError("gateway-restart reconciliation requires an official v3 pair")
     run_dir = Path(pair[f"{arm}_run"]).resolve()
+    other_arm = "theatre" if arm == "control" else "control"
+    other_run_dir = Path(pair[f"{other_arm}_run"]).resolve()
     manifest = read_json(run_dir / "manifest.json")
     flow_path = run_dir / "flow.json"
     flow = read_json(flow_path)
@@ -348,7 +603,15 @@ def reconcile_openclaw_v3_gateway_restart(
             raise V3ContractError("trajectory bytes differ from the existing reconciliation receipt")
         if receipt.get("source", {}).get("session_log_sha256") != hashlib.sha256(session_log_path.read_bytes()).hexdigest():
             raise V3ContractError("session-log bytes differ from the existing reconciliation receipt")
-        return receipt
+        if receipt.get("status") == "prepared_gateway_restart_reconciliation":
+            return _finish_v3_restart_reconciliation(
+                pair_dir, run_dir, other_run_dir, receipt_path, receipt
+            )
+        if receipt.get("status") != "reconciled_failed_contract":
+            raise V3ContractError("existing gateway-restart receipt has an invalid status")
+        return _finish_v3_restart_reconciliation(
+            pair_dir, run_dir, other_run_dir, receipt_path, receipt, resume=False
+        )
 
     journal = _read_jsonl(run_dir / "call-journal.jsonl")
     usage = _read_jsonl(run_dir / "usage.jsonl")
@@ -376,6 +639,49 @@ def reconcile_openclaw_v3_gateway_restart(
         raise V3ContractError("incomplete journal row does not identify the pending repair")
     if any(row.get("attempt_id") == attempt_id for row in [*usage, *decisions, *failures]):
         raise V3ContractError("incomplete repair already has usage or decision/failure evidence")
+    if started != journal[-1]:
+        raise V3ContractError("incomplete repair is not the final call-journal row")
+    control_state = read_json(Path(pair["control_run"]) / "state.json")
+    theatre_state = read_json(Path(pair["theatre_run"]) / "state.json")
+    control_done = bool(control_state.get("terminated"))
+    theatre_done = bool(theatre_state.get("terminated"))
+    if control_done and theatre_done:
+        selected_arm = None
+    elif control_done:
+        selected_arm = "theatre"
+    elif theatre_done:
+        selected_arm = "control"
+    elif int(control_state["day"]) < int(theatre_state["day"]):
+        selected_arm = "control"
+    elif int(theatre_state["day"]) < int(control_state["day"]):
+        selected_arm = "theatre"
+    else:
+        selected_arm = pair.get("next_arm")
+    if pair.get("status") not in ("ready", "running", "paused_quota") or selected_arm != arm:
+        raise V3ContractError("pair is not stopped at the selected arm")
+    state = read_json(run_dir / "state.json")
+    if (
+        started.get("state_hash") != stable_hash(state)
+        or started.get("state_hash") != flow.get("turn_state_hash")
+        or started.get("turn_index") != flow.get("turn_index")
+    ):
+        raise V3ContractError("incomplete repair does not match the active turn/state")
+    try:
+        serial = int(str(attempt_id).rsplit(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise V3ContractError("incomplete repair attempt id lacks its durable serial") from exc
+    if serial != flow.get("provider_attempt_serial"):
+        raise V3ContractError("incomplete repair is not the latest provider serial")
+
+    from .verify import verify_pair
+
+    expected_error = f"{arm}: call journal attempt {attempt_id} is incomplete or reordered"
+    verification = verify_pair(pair_dir)
+    if verification.get("errors") != [expected_error]:
+        raise V3ContractError(
+            "pair has integrity errors beyond the selected incomplete repair: "
+            + "; ".join(verification.get("errors", []))
+        )
 
     trajectory_rows = _read_jsonl(trajectory_path)
     interrupted = [row for row in trajectory_rows if row.get("runId") == interrupted_run_id]
@@ -537,10 +843,7 @@ def reconcile_openclaw_v3_gateway_restart(
     }
     ledger_path = Path(manifest["usage_ledger_path"])
     ledger = _read_jsonl(ledger_path)
-    _atomic_jsonl(run_dir / "usage.jsonl", [*usage, usage_row])
-    _atomic_jsonl(run_dir / "model-failures.jsonl", [*failures, failure_row])
-    _atomic_jsonl(ledger_path, [*ledger, usage_row])
-    _atomic_jsonl(run_dir / "call-journal.jsonl", [*journal, {
+    journal_terminal_row = {
         **{key: started[key] for key in (
             "attempt_id", "attempt_kind", "turn_index", "state_hash", "original_response_hash", "role"
         )},
@@ -550,30 +853,42 @@ def reconcile_openclaw_v3_gateway_restart(
         "response_hash": response_hash,
         "gateway_run_id": completed_run_id,
         "interrupted_gateway_run_id": interrupted_run_id,
-    }])
+    }
 
     reconciled_at = utc_now()
     reason = "gateway restarted during the frozen repair; auto-continuation preserved and charged but not applied"
-    flow["status"] = "failed_contract"
-    flow["updated_at"] = reconciled_at
-    flow["contract_failure"] = {"phase": role, "message": reason}
-    atomic_json(flow_path, flow)
-    pair["status"] = "failed_contract"
-    pair["last_arm"] = arm
-    pair["last_result"] = {
+    flow_transition = {
         "status": "failed_contract",
-        "reason": reason,
-        "run_dir": str(run_dir),
-        "provider_usage_charged": provider_usage,
-        "simulator_turns_added": 0,
+        "updated_at": reconciled_at,
+        "contract_failure": {"phase": role, "message": reason},
     }
-    pair["updated_at"] = reconciled_at
-    atomic_json(pair_path, pair)
+    pair_transition = {
+        "status": "failed_contract",
+        "last_arm": arm,
+        "last_result": {
+            "status": "failed_contract",
+            "reason": reason,
+            "run_dir": str(run_dir),
+            "provider_usage_charged": provider_usage,
+            "simulator_turns_added": 0,
+        },
+        "updated_at": reconciled_at,
+    }
+    target_rows = {
+        "usage": [*usage, usage_row],
+        "failures": [*failures, failure_row],
+        "ledger": [*ledger, usage_row],
+        "journal": [*journal, journal_terminal_row],
+    }
+    final_flow = deepcopy(flow)
+    final_flow.update(deepcopy(flow_transition))
+    final_pair = deepcopy(pair)
+    final_pair.update(deepcopy(pair_transition))
 
     repair_message_row, restart_message_row, response_message_row = matched[0]
     receipt = {
         "schema_version": 1,
-        "status": "reconciled_failed_contract",
+        "status": "prepared_gateway_restart_reconciliation",
         "reconciled_at": reconciled_at,
         "pair_id": pair["pair_id"],
         "run_id": manifest["run_id"],
@@ -602,6 +917,53 @@ def reconcile_openclaw_v3_gateway_restart(
         "simulator_turns_added": 0,
         "accepted_model_decisions_added": 0,
         "provider_usage_rows_added": 1,
+        "transaction": {
+            "transaction_id": stable_hash({
+                "pair_id": pair["pair_id"],
+                "run_id": manifest["run_id"],
+                "attempt_id": attempt_id,
+                "interrupted_gateway_run_id": interrupted_run_id,
+                "completed_gateway_run_id": completed_run_id,
+                "trajectory_sha256": hashlib.sha256(trajectory_path.read_bytes()).hexdigest(),
+                "session_log_sha256": hashlib.sha256(session_log_path.read_bytes()).hexdigest(),
+            }),
+            "ledger_path": str(ledger_path.resolve()),
+            "source": {
+                "files": {
+                    "usage": _file_record(run_dir / "usage.jsonl"),
+                    "failures": _file_record(run_dir / "model-failures.jsonl"),
+                    "ledger": _file_record(ledger_path),
+                    "journal": _file_record(run_dir / "call-journal.jsonl"),
+                },
+                "flow": _file_record(flow_path),
+                "flow_transition_fields": {
+                    key: deepcopy(flow[key])
+                    for key in ("status", "updated_at", "contract_failure")
+                    if key in flow
+                },
+                "pair": _file_record(pair_path),
+                "pair_transition_fields": {
+                    key: deepcopy(pair[key])
+                    for key in ("status", "last_arm", "last_result", "updated_at")
+                    if key in pair
+                },
+                "protected_artifacts": _restart_protected_artifacts(
+                    pair_dir, run_dir, other_run_dir
+                ),
+            },
+            "target": {
+                "files": {
+                    name: _jsonl_sha256(rows) for name, rows in target_rows.items()
+                },
+                "flow": _json_sha256(final_flow),
+                "pair": _json_sha256(final_pair),
+            },
+            "rows": target_rows,
+            "flow_transition": flow_transition,
+            "pair_transition": pair_transition,
+        },
     }
     atomic_json(receipt_path, receipt)
-    return receipt
+    return _finish_v3_restart_reconciliation(
+        pair_dir, run_dir, other_run_dir, receipt_path, receipt
+    )
