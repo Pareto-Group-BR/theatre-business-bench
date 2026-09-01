@@ -14,8 +14,8 @@
 - Pair: `20260829T021739Z-pair-s1201`
 - Seed: `1201` · horizonte: `365` dias
 - Modelo: `openai/gpt-5.6-sol` · thinking: `medium`
-- Encerrado em: `2026-08-31T01:54:45+00:00`
-- Integridade: `passed` · report digest: `35820aadc726fc4ef59ca44b03fd531595621adc400acd7b577968468b6e46e5`
+- Encerrado em: `2026-09-01T00:10:10+00:00`
+- Integridade: `passed` · report digest: `5827d9658c0e2f954a5d0842a3cf886221fa6605a42911cc11d9d2baa10c2ced`
 
 ## Evidência por braço
 
