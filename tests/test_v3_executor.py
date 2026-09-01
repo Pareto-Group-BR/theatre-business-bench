@@ -450,7 +450,7 @@ class V3ExecutorTests(unittest.TestCase):
                 session_log.write_text(
                     "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
                 )
-                with self.assertRaisesRegex(V3ContractError, "one exact repair"):
+                with self.assertRaisesRegex(V3ContractError, "one exact invocation"):
                     reconcile_openclaw_v3_gateway_restart(
                         pair_dir, "theatre", trajectory, session_log,
                         interrupted_id, completed_id,
@@ -459,7 +459,7 @@ class V3ExecutorTests(unittest.TestCase):
                 session_log.write_text(
                     "".join(json.dumps(row) + "\n" for row in session_rows[:-1]), encoding="utf-8"
                 )
-                with self.assertRaisesRegex(V3ContractError, "one exact repair"):
+                with self.assertRaisesRegex(V3ContractError, "one exact invocation"):
                     reconcile_openclaw_v3_gateway_restart(
                         pair_dir, "theatre", trajectory, session_log,
                         interrupted_id, completed_id,
@@ -553,6 +553,122 @@ class V3ExecutorTests(unittest.TestCase):
                 "theatre: gateway-restart reconciliation receipt is inconsistent",
                 tampered["errors"],
             )
+
+    def test_gateway_restart_reconciliation_terminalizes_original_invocation(self) -> None:
+        original_messages: list[str] = []
+
+        def interrupted_invoke(
+            _transport: OpenClawCodexTransport, _session_key: str, message: str
+        ) -> ModelResult:
+            original_messages.append(message)
+            raise KeyboardInterrupt("gateway restart")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = self._activated(root)
+            with patch.object(OpenClawCodexTransport, "invoke", new=interrupted_invoke):
+                with self.assertRaises(KeyboardInterrupt):
+                    step_pair(pair_dir)
+            self.assertEqual(len(original_messages), 1)
+
+            pair = read_json(pair_dir / "pair.json")
+            arm = pair["next_arm"]
+            run_dir = Path(pair[f"{arm}_run"])
+            flow = read_json(run_dir / "flow.json")
+            role = flow["phase"]
+            self.assertIsNone(flow["pending_invocation"])
+            journal = [
+                json.loads(line)
+                for line in (run_dir / "call-journal.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(journal), 1)
+            self.assertEqual(journal[0]["attempt_kind"], "original")
+
+            trace_id = "trace-original-restart"
+            interrupted_id = "gateway-original-interrupted"
+            completed_id = "gateway-original-auto-continuation"
+            session_key = f"agent:business-bench:bench-{run_dir.name.lower()}-{role}"
+            raw_text = json.dumps(control() if role == "control" else critic())
+            common = {
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "traceId": trace_id, "sessionId": trace_id,
+                "sessionKey": session_key, "provider": "openai", "modelId": "gpt-5.6-sol",
+            }
+            trajectory_rows = [
+                {**common, "type": "session.started", "runId": interrupted_id, "ts": "2099-09-01T00:00:00Z"},
+                {**common, "type": "context.compiled", "runId": interrupted_id, "ts": "2099-09-01T00:00:01Z", "data": {"prompt": original_messages[0]}},
+                {**common, "type": "prompt.submitted", "runId": interrupted_id, "ts": "2099-09-01T00:00:02Z", "data": {"prompt": original_messages[0]}},
+                {**common, "type": "session.started", "runId": completed_id, "ts": "2099-09-01T00:01:00Z"},
+                {**common, "type": "context.compiled", "runId": completed_id, "ts": "2099-09-01T00:01:01Z", "data": {"prompt": "restart continuation"}},
+                {**common, "type": "prompt.submitted", "runId": completed_id, "ts": "2099-09-01T00:01:02Z", "data": {"prompt": "restart continuation"}},
+                {**common, "type": "model.completed", "runId": completed_id, "ts": "2099-09-01T00:02:00Z", "data": {
+                    "timedOut": False, "aborted": False, "yieldDetected": False,
+                    "promptError": None, "terminalError": None,
+                    "assistantTexts": [raw_text],
+                    "usage": {"input": 20, "cacheRead": 2, "cacheWrite": 0, "output": 5, "total": 27},
+                }},
+                {**common, "type": "session.ended", "runId": completed_id, "ts": "2099-09-01T00:02:01Z", "data": {"status": "success"}},
+            ]
+            trajectory = root / "original.trajectory.jsonl"
+            trajectory.write_text(
+                "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
+            )
+            session_rows = [
+                {"type": "session", "id": trace_id},
+                {"type": "message", "id": "original-message", "parentId": "prior", "timestamp": "2099-09-01T00:00:03Z",
+                 "message": {"role": "user", "content": original_messages[0]}},
+                {"type": "message", "id": "restart-message", "parentId": "original-message", "timestamp": "2099-09-01T00:01:03Z", "message": {
+                    "role": "user", "content": "[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting.",
+                    "idempotencyKey": "codex-app-server:thread-continuation:turn-continuation:prompt",
+                    "__openclaw": {"mirrorOrigin": "codex-app-server", "mirrorIdentity": "turn-continuation:prompt"},
+                }},
+                {"type": "message", "id": "response-message", "parentId": "restart-message", "timestamp": "2099-09-01T00:02:00Z", "message": {
+                    "role": "assistant", "content": raw_text, "api": "openai-chatgpt-responses",
+                    "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop",
+                    "usage": {"input": 20, "cacheRead": 2, "cacheWrite": 0, "output": 5, "totalTokens": 27},
+                    "idempotencyKey": "codex-app-server:thread-continuation:turn-continuation:assistant",
+                    "__openclaw": {"mirrorOrigin": "codex-app-server", "mirrorIdentity": "turn-continuation:assistant"},
+                }},
+            ]
+            session_log = root / "original.session.jsonl"
+            session_log.write_text(
+                "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
+            )
+
+            with self._official_lock(root):
+                first = reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, arm, trajectory, session_log, interrupted_id, completed_id
+                )
+                committed_paths = [
+                    run_dir / "usage.jsonl", run_dir / "model-failures.jsonl",
+                    run_dir / "call-journal.jsonl", run_dir / "flow.json",
+                    run_dir / "gateway-restart-reconciliation.json", pair_dir / "pair.json",
+                    Path(read_json(run_dir / "manifest.json")["usage_ledger_path"]),
+                ]
+                committed_bytes = {str(path): path.read_bytes() for path in committed_paths}
+                second = reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, arm, trajectory, session_log, interrupted_id, completed_id
+                )
+            self.assertEqual(first, second)
+            self.assertEqual(
+                committed_bytes, {str(path): path.read_bytes() for path in committed_paths}
+            )
+            self.assertEqual(first["status"], "reconciled_failed_contract")
+            self.assertEqual(first["attempt_kind"], "original")
+            self.assertEqual(first["provider_usage"]["total"], 27)
+            self.assertEqual(read_json(pair_dir / "pair.json")["status"], "failed_contract")
+            self.assertEqual(read_json(run_dir / "flow.json")["status"], "failed_contract")
+            self.assertFalse((run_dir / "turns.jsonl").exists())
+            failures = [
+                json.loads(line)
+                for line in (run_dir / "model-failures.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(failures[-1]["attempt_kind"], "original")
+            self.assertNotIn("original_response_hash", failures[-1])
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+            self.assertEqual(report["runs"][arm]["first_pass_contract_failures"], 0)
+            self.assertEqual(report["runs"][arm]["terminal_repair_failures"], 0)
 
     def test_gateway_restart_reconciliation_refuses_session_without_exact_repair(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

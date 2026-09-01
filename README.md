@@ -164,10 +164,11 @@ journal, or replay divergence stops loud before any simulator transition.
 
 A gateway restart may kill the runner after the write-ahead `started` row while
 OpenClaw later auto-continues the same role session under a second gateway run
-id. That is not silently accepted as the frozen repair. The forensic command
-below requires the exact trajectory **and** full session log, binds the original
-repair prompt, the explicit restart message, the returned bytes and provider
-usage, then terminally preserves the pair without applying a business action:
+id. That is not silently accepted as the frozen original or repair invocation.
+The forensic command below requires the exact trajectory **and** full session
+log, reconstructs and binds the frozen invocation prompt, the explicit restart
+message, the returned bytes and provider usage, then terminally preserves the
+pair without applying a business action:
 
 ```bash
 THEATRE_PAIR_DIR=/absolute/run-root/pairs/<pair-id> \
@@ -188,7 +189,7 @@ command first persists a prepared receipt, resumes safely after interruption at 
 boundary, and is byte-idempotent for the same source bytes and ids. It charges the
 completed continuation, records the interrupted id, adds zero accepted model
 decisions and zero simulator turns, and leaves the seed `failed_contract` for
-campaign reliability analysis. It never authorizes retrying that repair.
+campaign reliability analysis. It never authorizes retrying that invocation.
 
 A narrower restart can stop the runner after the write-ahead `started` row but
 before OpenClaw records even `session.started`. In that case there are no

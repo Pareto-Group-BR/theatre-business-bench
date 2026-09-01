@@ -89,10 +89,11 @@ completion write, an OpenClaw session can contain a second, automatic
 continuation even though the benchmark process is gone. The verifier rejects
 that incomplete journal by default. The only recovery path is the forensic
 `reconcile-openclaw-v3-gateway-restart` transition: it requires both immutable
-trajectory events and the full session log, proves the exact frozen repair
-message immediately precedes the restart marker and returned bytes, charges the
-completed continuation, and terminally records a transport-recovery failure.
-No returned action is applied and the repair cannot be retried. The receipt
+trajectory events and the full session log, reconstructs the exact frozen
+original or repair message immediately preceding the restart marker and
+returned bytes, charges the completed continuation, and terminally records a
+transport-recovery failure.
+No returned action is applied and the invocation cannot be retried. The receipt
 binds both gateway run ids, both source-file hashes, the completed event, the
 three exact session messages, provider usage and the zero-turn/zero-decision
 claim; `verify-pair` confronts those bindings offline.

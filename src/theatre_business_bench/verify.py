@@ -62,6 +62,25 @@ def _jsonl_record(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _gateway_restart_attempt_kind(receipt: dict[str, Any]) -> str:
+    return str(receipt.get("attempt_kind", "repair"))
+
+
+def _gateway_restart_reason(receipt: dict[str, Any]) -> str | None:
+    attempt_kind = _gateway_restart_attempt_kind(receipt)
+    if attempt_kind == "repair":
+        return (
+            "gateway restarted during the frozen repair; auto-continuation "
+            "preserved and charged but not applied"
+        )
+    if attempt_kind == "original":
+        return (
+            "gateway restarted during the frozen original invocation; auto-continuation "
+            "preserved and charged but not applied"
+        )
+    return None
+
+
 def _restart_protected_records(
     pair_dir: Path, run_dir: Path, other_run_dir: Path
 ) -> dict[str, dict[str, Any]]:
@@ -142,7 +161,10 @@ def _verify_gateway_restart_transaction(
         "attempt_id": receipt.get("attempt_id"),
         "role": receipt.get("role"),
         "turn_index": receipt.get("turn_index"),
+        "attempt_kind": _gateway_restart_attempt_kind(receipt),
     }
+    if "state_hash" in receipt:
+        identity["state_hash"] = receipt.get("state_hash")
     if (
         any(usage_row.get(key) != value for key, value in identity.items())
         or any(failure_row.get(key) != value for key, value in identity.items())
@@ -205,10 +227,9 @@ def _verify_gateway_restart_transaction(
         errors.append(f"{arm}: gateway-restart source flow cannot be reconstructed")
     if json_sha(source_pair) != source.get("pair", {}).get("sha256"):
         errors.append(f"{arm}: gateway-restart source pair cannot be reconstructed")
-    reason = (
-        "gateway restarted during the frozen repair; auto-continuation "
-        "preserved and charged but not applied"
-    )
+    reason = _gateway_restart_reason(receipt)
+    if reason is None:
+        errors.append(f"{arm}: gateway-restart receipt attempt kind is invalid")
     expected_flow_transition = {
         "status": "failed_contract",
         "updated_at": receipt.get("reconciled_at"),
@@ -730,6 +751,30 @@ def _verify_run(
                 matching_journal = journal_by_attempt.get(str(attempt_id), [])
                 source = receipt.get("source") if isinstance(receipt.get("source"), dict) else {}
                 pending = flow.get("pending_invocation")
+                attempt_kind = _gateway_restart_attempt_kind(receipt)
+                if attempt_kind == "repair":
+                    attempt_specific_consistent = (
+                        failure.get("attempt_kind") == "repair"
+                        and isinstance(pending, dict)
+                        and pending.get("role") == receipt.get("role")
+                        and pending.get("turn_index") == receipt.get("turn_index")
+                        and pending.get("state_hash") == failure.get("state_hash")
+                        and pending.get("original_response_hash")
+                        == failure.get("original_response_hash")
+                        and isinstance(source.get("repair_message_sha256"), str)
+                        and len(source["repair_message_sha256"]) == 64
+                    )
+                elif attempt_kind == "original":
+                    attempt_specific_consistent = (
+                        failure.get("attempt_kind") == "original"
+                        and pending is None
+                        and receipt.get("state_hash") == failure.get("state_hash")
+                        and "original_response_hash" not in failure
+                        and isinstance(source.get("original_message_sha256"), str)
+                        and len(source["original_message_sha256"]) == 64
+                    )
+                else:
+                    attempt_specific_consistent = False
                 receipt_consistent = (
                     receipt.get("schema_version") == 1
                     and receipt.get("status") == "reconciled_failed_contract"
@@ -742,13 +787,8 @@ def _verify_run(
                     and receipt.get("interrupted_gateway_run_id") == failure.get("interrupted_gateway_run_id")
                     and receipt.get("provider_usage") == (matching_usage[0].get("usage") if len(matching_usage) == 1 else None)
                     and failure.get("failure_kind") == "gateway_restart_recovery"
-                    and failure.get("attempt_kind") == "repair"
                     and flow.get("status") == "failed_contract"
-                    and isinstance(pending, dict)
-                    and pending.get("role") == receipt.get("role")
-                    and pending.get("turn_index") == receipt.get("turn_index")
-                    and pending.get("state_hash") == failure.get("state_hash")
-                    and pending.get("original_response_hash") == failure.get("original_response_hash")
+                    and attempt_specific_consistent
                     and len(matching_journal) == 2
                     and matching_journal[-1].get("outcome") == "gateway_restart_recovery_terminal"
                     and matching_journal[-1].get("gateway_run_id") == receipt.get("completed_gateway_run_id")
@@ -760,7 +800,7 @@ def _verify_run(
                     and source.get("completed_event_sha256") == failure.get("trajectory_event_sha256")
                     and all(isinstance(source.get(key), str) and len(source[key]) == 64 for key in (
                         "trajectory_sha256", "session_log_sha256", "completed_event_sha256",
-                        "repair_message_sha256", "restart_message_sha256", "response_message_sha256",
+                        "restart_message_sha256", "response_message_sha256",
                     ))
                     and receipt.get("simulator_turns_added") == 0
                     and receipt.get("accepted_model_decisions_added") == 0
@@ -1362,7 +1402,9 @@ def _verify_run(
         "first_pass_contract_failures": sum(
             1 for row in invocations if row.get("original_validation_errors")
         ) + sum(
-            1 for row in failures if row.get("failure_kind") == "gateway_restart_recovery"
+            1 for row in failures
+            if row.get("failure_kind") == "gateway_restart_recovery"
+            and row.get("attempt_kind") == "repair"
         ) if protocol == "v3" else 0,
         "successful_repairs": sum(
             1 for row in invocations if row.get("outcome") == "accepted_repair"
@@ -1370,7 +1412,9 @@ def _verify_run(
         "terminal_repair_failures": sum(
             1 for row in invocations if row.get("outcome") == "failed_contract_after_repair"
         ) + sum(
-            1 for row in failures if row.get("failure_kind") == "gateway_restart_recovery"
+            1 for row in failures
+            if row.get("failure_kind") == "gateway_restart_recovery"
+            and row.get("attempt_kind") == "repair"
         ) if protocol == "v3" else 0,
         "repair_calls": len(repair_rows) if protocol == "v3" else 0,
         "repair_tokens": sum(

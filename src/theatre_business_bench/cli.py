@@ -415,7 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconcile_v3 = sub.add_parser(
         "reconcile-openclaw-v3-gateway-restart",
-        help="terminally preserve and charge one v3 repair auto-continued after a gateway restart",
+        help="terminally preserve and charge one v3 invocation auto-continued after a gateway restart",
     )
     reconcile_v3.add_argument("--pair", required=True)
     reconcile_v3.add_argument("--arm", choices=("control", "theatre"), required=True)
