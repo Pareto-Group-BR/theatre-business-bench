@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .runner import _v3_repair_message, atomic_json, read_json, utc_now
-from .simulator import stable_hash
+from .runner import _role_message, _v3_repair_message, atomic_json, read_json, utc_now
+from .simulator import VendingSimulator, stable_hash
 from .transport import ModelTransportError, parse_json_object
 from .v2 import V2ContractError
 from .v3 import V3ContractError
@@ -387,6 +387,25 @@ def _message_text(row: dict[str, Any]) -> str | None:
     return "".join(parts)
 
 
+def _gateway_restart_attempt_kind(receipt: dict[str, Any]) -> str:
+    """Read new receipts while preserving historical repair-only receipts."""
+    return str(receipt.get("attempt_kind", "repair"))
+
+
+def _gateway_restart_reason(attempt_kind: str) -> str:
+    if attempt_kind == "repair":
+        return (
+            "gateway restarted during the frozen repair; auto-continuation "
+            "preserved and charged but not applied"
+        )
+    if attempt_kind == "original":
+        return (
+            "gateway restarted during the frozen original invocation; auto-continuation "
+            "preserved and charged but not applied"
+        )
+    raise V3ContractError("gateway-restart receipt has an invalid attempt kind")
+
+
 def _finish_v3_restart_reconciliation(
     pair_dir: Path, run_dir: Path, other_run_dir: Path, receipt_path: Path,
     receipt: dict[str, Any], *, resume: bool = True,
@@ -422,7 +441,10 @@ def _finish_v3_restart_reconciliation(
         "attempt_id": receipt.get("attempt_id"),
         "role": receipt.get("role"),
         "turn_index": receipt.get("turn_index"),
+        "attempt_kind": _gateway_restart_attempt_kind(receipt),
     }
+    if "state_hash" in receipt:
+        expected_identity["state_hash"] = receipt.get("state_hash")
     if (
         any(usage_row.get(key) != value for key, value in expected_identity.items())
         or any(failure_row.get(key) != value for key, value in expected_identity.items())
@@ -483,10 +505,7 @@ def _finish_v3_restart_reconciliation(
                 f"gateway-restart {name} changed outside the prepared transaction"
             )
 
-    reason = (
-        "gateway restarted during the frozen repair; auto-continuation "
-        "preserved and charged but not applied"
-    )
+    reason = _gateway_restart_reason(_gateway_restart_attempt_kind(receipt))
     expected_flow_transition = {
         "status": "failed_contract",
         "updated_at": receipt.get("reconciled_at"),
@@ -575,14 +594,14 @@ def reconcile_openclaw_v3_gateway_restart(
     interrupted_run_id: str,
     completed_run_id: str,
 ) -> dict[str, Any]:
-    """Terminally preserve one v3 repair interrupted and auto-continued by OpenClaw.
+    """Terminally preserve one v3 invocation interrupted and auto-continued by OpenClaw.
 
     A gateway restart can kill the benchmark process after the write-ahead
     ``started`` row while OpenClaw later continues the same session as a new
-    provider run.  That continuation is not the one frozen repair call, so it
-    can never be accepted into the simulator.  It still consumed model usage
-    and therefore must be imported as terminal evidence instead of retried or
-    discarded.
+    provider run.  That continuation is not the frozen original or repair call,
+    so it can never be accepted into the simulator.  It still consumed model
+    usage and therefore must be imported as terminal evidence instead of
+    retried or discarded.
     """
     _require_official_lock()
     pair_dir = pair_dir.resolve()
@@ -606,14 +625,15 @@ def reconcile_openclaw_v3_gateway_restart(
     pending = flow.get("pending_invocation")
     if manifest.get("protocol_version") != "v3" or manifest.get("official") is not True:
         raise V3ContractError("selected run is not an official v3 run")
-    if not isinstance(pending, dict):
-        raise V3ContractError("selected run has no pending v3 repair")
-    role = pending.get("role")
+    attempt_kind = "repair" if isinstance(pending, dict) else "original"
+    role = pending.get("role") if isinstance(pending, dict) else flow.get("phase")
     allowed_roles = {"control"} if arm == "control" else {"critic", "consciousness", "planner", "actor"}
     if role not in allowed_roles or flow.get("current_step") != "model_roles":
-        raise V3ContractError("selected run is not stopped at the expected pending repair")
+        raise V3ContractError("selected run is not stopped at the expected v3 invocation")
 
     receipt_path = run_dir / "gateway-restart-reconciliation.json"
+    if attempt_kind == "original" and flow.get("status") != "running" and not receipt_path.exists():
+        raise V3ContractError("selected original invocation is not running")
     if receipt_path.exists():
         receipt = read_json(receipt_path)
         expected = {
@@ -622,6 +642,8 @@ def reconcile_openclaw_v3_gateway_restart(
         }
         if any(receipt.get(key) != value for key, value in expected.items()):
             raise V3ContractError("existing gateway-restart receipt belongs to different run ids")
+        if _gateway_restart_attempt_kind(receipt) != attempt_kind:
+            raise V3ContractError("existing gateway-restart receipt belongs to a different attempt kind")
         if receipt.get("source", {}).get("trajectory_sha256") != hashlib.sha256(trajectory_path.read_bytes()).hexdigest():
             raise V3ContractError("trajectory bytes differ from the existing reconciliation receipt")
         if receipt.get("source", {}).get("session_log_sha256") != hashlib.sha256(session_log_path.read_bytes()).hexdigest():
@@ -652,18 +674,19 @@ def reconcile_openclaw_v3_gateway_restart(
     started = open_attempts[0]
     attempt_id = started.get("attempt_id")
     expected_started = {
-        "attempt_kind": "repair",
+        "attempt_kind": attempt_kind,
         "role": role,
-        "turn_index": pending.get("turn_index"),
-        "state_hash": pending.get("state_hash"),
-        "original_response_hash": pending.get("original_response_hash"),
+        "turn_index": pending.get("turn_index") if isinstance(pending, dict) else flow.get("turn_index"),
+        "state_hash": pending.get("state_hash") if isinstance(pending, dict) else flow.get("turn_state_hash"),
     }
+    if isinstance(pending, dict):
+        expected_started["original_response_hash"] = pending.get("original_response_hash")
     if any(started.get(key) != value for key, value in expected_started.items()):
-        raise V3ContractError("incomplete journal row does not identify the pending repair")
+        raise V3ContractError("incomplete journal row does not identify the pending invocation")
     if any(row.get("attempt_id") == attempt_id for row in [*usage, *decisions, *failures]):
-        raise V3ContractError("incomplete repair already has usage or decision/failure evidence")
+        raise V3ContractError("incomplete invocation already has usage or decision/failure evidence")
     if started != journal[-1]:
-        raise V3ContractError("incomplete repair is not the final call-journal row")
+        raise V3ContractError("incomplete invocation is not the final call-journal row")
     control_state = read_json(Path(pair["control_run"]) / "state.json")
     theatre_state = read_json(Path(pair["theatre_run"]) / "state.json")
     control_done = bool(control_state.get("terminated"))
@@ -688,13 +711,13 @@ def reconcile_openclaw_v3_gateway_restart(
         or started.get("state_hash") != flow.get("turn_state_hash")
         or started.get("turn_index") != flow.get("turn_index")
     ):
-        raise V3ContractError("incomplete repair does not match the active turn/state")
+        raise V3ContractError("incomplete invocation does not match the active turn/state")
     try:
         serial = int(str(attempt_id).rsplit(":", 1)[1])
     except (IndexError, ValueError) as exc:
-        raise V3ContractError("incomplete repair attempt id lacks its durable serial") from exc
+        raise V3ContractError("incomplete invocation attempt id lacks its durable serial") from exc
     if serial != flow.get("provider_attempt_serial"):
-        raise V3ContractError("incomplete repair is not the latest provider serial")
+        raise V3ContractError("incomplete invocation is not the latest provider serial")
 
     from .verify import verify_pair
 
@@ -702,7 +725,7 @@ def reconcile_openclaw_v3_gateway_restart(
     verification = verify_pair(pair_dir)
     if verification.get("errors") != [expected_error]:
         raise V3ContractError(
-            "pair has integrity errors beyond the selected incomplete repair: "
+            "pair has integrity errors beyond the selected incomplete invocation: "
             + "; ".join(verification.get("errors", []))
         )
 
@@ -751,18 +774,29 @@ def reconcile_openclaw_v3_gateway_restart(
     session_rows = _read_jsonl(session_log_path)
     if not session_rows or session_rows[0].get("type") != "session" or session_rows[0].get("id") != trace_id:
         raise V3ContractError("session log does not identify the selected OpenClaw trace")
-    expected_repair = _v3_repair_message(
-        run_dir,
-        str(role),
-        pending["original"],
-        pending["original_validation_errors"],
-        pending["original_message"],
-    )
+    if isinstance(pending, dict):
+        expected_invocation = _v3_repair_message(
+            run_dir,
+            str(role),
+            pending["original"],
+            pending["original_validation_errors"],
+            pending["original_message"],
+        )
+        invocation_hash_key = "repair_message_sha256"
+    else:
+        scenario = read_json(run_dir / "scenario.json")
+        state = read_json(run_dir / "state.json")
+        memories = read_json(run_dir / "role-memory.json")
+        view = VendingSimulator(scenario, manifest["seed"], state=state).public_view()
+        expected_invocation = _role_message(
+            run_dir, manifest, str(role), view, flow, memories
+        )
+        invocation_hash_key = "original_message_sha256"
 
     def trajectory_prompt_matches(row: dict[str, Any]) -> bool:
         data = row.get("data")
         observed = data.get("prompt") if isinstance(data, dict) else None
-        if observed == expected_repair:
+        if observed == expected_invocation:
             return True
         # OpenClaw trajectory rows cap long prompt fields at 20,000 content
         # characters plus one explicit ellipsis. The full session-log message
@@ -772,19 +806,19 @@ def reconcile_openclaw_v3_gateway_restart(
             isinstance(observed, str)
             and len(observed) == 20_001
             and observed.endswith("…")
-            and len(expected_repair) > 20_000
-            and observed[:-1] == expected_repair[:20_000]
+            and len(expected_invocation) > 20_000
+            and observed[:-1] == expected_invocation[:20_000]
         )
 
     if any(not trajectory_prompt_matches(row) for row in interrupted[1:]):
-        raise V3ContractError("interrupted trajectory does not contain the exact frozen repair prompt")
+        raise V3ContractError("interrupted trajectory does not contain the exact frozen invocation prompt")
     messages = [row for row in session_rows if row.get("type") == "message"]
     matched = []
     for index in range(len(messages) - 2):
         first, second, third = messages[index:index + 3]
         if (
             first.get("message", {}).get("role") == "user"
-            and _message_text(first) == expected_repair
+            and _message_text(first) == expected_invocation
             and second.get("message", {}).get("role") == "user"
             and (_message_text(second) or "").startswith("[System] Your previous turn was interrupted by a gateway restart")
             and third.get("message", {}).get("role") == "assistant"
@@ -792,8 +826,8 @@ def reconcile_openclaw_v3_gateway_restart(
         ):
             matched.append((first, second, third))
     if len(matched) != 1:
-        raise V3ContractError("session log does not contain one exact repair→restart→response chain")
-    repair_message_row, restart_message_row, response_message_row = matched[0]
+        raise V3ContractError("session log does not contain one exact invocation→restart→response chain")
+    invocation_message_row, restart_message_row, response_message_row = matched[0]
 
     try:
         content = parse_json_object(raw_text)
@@ -854,17 +888,18 @@ def reconcile_openclaw_v3_gateway_restart(
         "outcome": "gateway_restart_recovery_terminal",
         "evidence_source": "openclaw_gateway_restart_reconciliation",
         "attempt_id": attempt_id,
-        "attempt_kind": "repair",
-        "turn_index": pending["turn_index"],
-        "state_hash": pending["state_hash"],
-        "original_response_hash": pending["original_response_hash"],
+        "attempt_kind": attempt_kind,
+        "turn_index": started["turn_index"],
+        "state_hash": started["state_hash"],
     }
+    if isinstance(pending, dict):
+        usage_row["original_response_hash"] = pending["original_response_hash"]
     if parse_error is not None:
         usage_row["parse_error"] = parse_error
     failure_row = {
         **{key: usage_row[key] for key in (
             "timestamp", "duration_ms", "turn_index", "role", "gateway_run_id",
-            "session_id", "attempt_id", "attempt_kind", "state_hash", "original_response_hash",
+            "session_id", "attempt_id", "attempt_kind", "state_hash",
             "evidence_source", "interrupted_gateway_run_id",
         )},
         "failure_kind": "gateway_restart_recovery",
@@ -873,12 +908,15 @@ def reconcile_openclaw_v3_gateway_restart(
         "parse_error": parse_error,
         "trajectory_event_sha256": event_sha256,
     }
+    if isinstance(pending, dict):
+        failure_row["original_response_hash"] = pending["original_response_hash"]
     ledger_path = Path(manifest["usage_ledger_path"])
     ledger = _read_jsonl(ledger_path)
+    journal_identity_keys = ["attempt_id", "attempt_kind", "turn_index", "state_hash", "role"]
+    if isinstance(pending, dict):
+        journal_identity_keys.append("original_response_hash")
     journal_terminal_row = {
-        **{key: started[key] for key in (
-            "attempt_id", "attempt_kind", "turn_index", "state_hash", "original_response_hash", "role"
-        )},
+        **{key: started[key] for key in journal_identity_keys},
         "event": "completed",
         "timestamp": timestamp,
         "outcome": "gateway_restart_recovery_terminal",
@@ -888,7 +926,7 @@ def reconcile_openclaw_v3_gateway_restart(
     }
 
     reconciled_at = utc_now()
-    reason = "gateway restarted during the frozen repair; auto-continuation preserved and charged but not applied"
+    reason = _gateway_restart_reason(attempt_kind)
     flow_transition = {
         "status": "failed_contract",
         "updated_at": reconciled_at,
@@ -924,9 +962,11 @@ def reconcile_openclaw_v3_gateway_restart(
         "pair_id": pair["pair_id"],
         "run_id": manifest["run_id"],
         "arm": arm,
-        "turn_index": pending["turn_index"],
+        "turn_index": started["turn_index"],
         "role": role,
         "attempt_id": attempt_id,
+        "attempt_kind": attempt_kind,
+        "state_hash": started["state_hash"],
         "interrupted_gateway_run_id": interrupted_run_id,
         "completed_gateway_run_id": completed_run_id,
         "response_hash": response_hash,
@@ -939,7 +979,7 @@ def reconcile_openclaw_v3_gateway_restart(
             "session_log_sha256": hashlib.sha256(session_log_path.read_bytes()).hexdigest(),
             "trace_id": trace_id,
             "completed_event_sha256": event_sha256,
-            "repair_message_sha256": hashlib.sha256(_canonical(repair_message_row).encode()).hexdigest(),
+            invocation_hash_key: hashlib.sha256(_canonical(invocation_message_row).encode()).hexdigest(),
             "restart_message_sha256": hashlib.sha256(_canonical(restart_message_row).encode()).hexdigest(),
             "response_message_sha256": hashlib.sha256(_canonical(response_message_row).encode()).hexdigest(),
         },
