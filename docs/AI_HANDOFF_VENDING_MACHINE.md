@@ -21,10 +21,10 @@
 - Um auto-continue da sessão produziu bytes e usage depois do restart. Esses
   bytes não podem virar ação: `reconcile-openclaw-v3-gateway-restart` exige
   trajetória + session log exatos, contabiliza a continuação e terminaliza a
-  seed sem turno de simulador. O formato terminal-only observado só é aceito
-  com `session.ended/status=success` e a mesma chamada comprovada no log por
-  trace/thread/turn, cadeia de mensagens, provider/model, resposta e usage;
-  ausência, adulteração ou fim não-success falham sem escrita. Depois disso, a
+  seed sem turno de simulador. O formato observado exige `model.completed`
+  seguido de `session.ended/status=success`, com a mesma resposta comprovada
+  na sessão; ausência, adulteração, timeout/abort/yield/erro terminal ou fim
+  não-success falham sem escrita. Depois disso, a
   campanha segue pelas seeds restantes; a seed afetada permanece falha observada.
 - As seções 10 e 11 permanecem deliberadamente como diagnóstico do checkpoint
   D189 que motivou o desenho v2; não devem ser lidas como estado corrente.

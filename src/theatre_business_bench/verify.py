@@ -541,8 +541,6 @@ def _verify_run(
                     and bool(source.get("trace_id"))
                     and source.get("trace_id") == failure.get("session_id")
                     and source.get("completed_event_sha256") == failure.get("trajectory_event_sha256")
-                    and source.get("completion_kind") == failure.get("trajectory_completion_kind")
-                    and source.get("completion_kind") in ("model.completed", "session.ended_success")
                     and all(isinstance(source.get(key), str) and len(source[key]) == 64 for key in (
                         "trajectory_sha256", "session_log_sha256", "completed_event_sha256",
                         "repair_message_sha256", "restart_message_sha256", "response_message_sha256",

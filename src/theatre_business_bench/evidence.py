@@ -688,14 +688,9 @@ def reconcile_openclaw_v3_gateway_restart(
     completed = [row for row in trajectory_rows if row.get("runId") == completed_run_id]
     if [row.get("type") for row in interrupted] != ["session.started", "context.compiled", "prompt.submitted"]:
         raise V3ContractError("interrupted gateway run is not the exact start/context/prompt-only shape")
-    completed_types = [row.get("type") for row in completed]
-    model_completed_shape = completed_types == [
+    if [row.get("type") for row in completed] != [
         "session.started", "context.compiled", "prompt.submitted", "model.completed", "session.ended"
-    ]
-    session_ended_shape = completed_types == [
-        "session.started", "context.compiled", "prompt.submitted", "session.ended"
-    ]
-    if not model_completed_shape and not session_ended_shape:
+    ]:
         raise V3ContractError("completed gateway continuation has an unexpected event shape")
     trace_ids = {str(row.get("traceId", "")) for row in [*interrupted, *completed]}
     if len(trace_ids) != 1 or "" in trace_ids:
@@ -711,29 +706,24 @@ def reconcile_openclaw_v3_gateway_restart(
         if row.get("provider") != "openai" or row.get("modelId") != str(manifest["model"]).split("/", 1)[-1]:
             raise V3ContractError("gateway event provider/model differs from the frozen manifest")
 
-    end_event = completed[-1]
-    end_data = end_event.get("data")
-    if not isinstance(end_data, dict):
-        raise V3ContractError("gateway continuation session.ended event is missing data")
-    allowed_end_statuses = {"completed", "success"} if model_completed_shape else {"success"}
-    if end_data.get("status") not in allowed_end_statuses:
+    model_event = completed[3]
+    end_data = completed[-1].get("data")
+    if not isinstance(end_data, dict) or end_data.get("status") not in ("completed", "success"):
         raise V3ContractError("gateway continuation does not end successfully")
     if any(end_data.get(key) not in (False, None) for key in (
         "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
     )):
         raise V3ContractError("gateway continuation session.ended reports failure")
 
-    model_event = completed[3] if model_completed_shape else None
-    data = model_event.get("data") if model_event is not None else None
-    if model_event is not None:
-        if not isinstance(data, dict) or any(data.get(key) not in (False, None) for key in ("timedOut", "aborted", "promptError")):
-            raise V3ContractError("gateway continuation is not one completed provider response")
-        texts = data.get("assistantTexts")
-        if not isinstance(texts, list) or len(texts) != 1 or not isinstance(texts[0], str):
-            raise V3ContractError("gateway continuation must contain exactly one assistant text")
-        trajectory_raw_text: str | None = texts[0]
-    else:
-        trajectory_raw_text = None
+    data = model_event.get("data")
+    if not isinstance(data, dict) or any(data.get(key) not in (False, None) for key in (
+        "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
+    )):
+        raise V3ContractError("gateway continuation is not one completed provider response")
+    texts = data.get("assistantTexts")
+    if not isinstance(texts, list) or len(texts) != 1 or not isinstance(texts[0], str):
+        raise V3ContractError("gateway continuation must contain exactly one assistant text")
+    raw_text = texts[0]
 
     session_rows = _read_jsonl(session_log_path)
     if not session_rows or session_rows[0].get("type") != "session" or session_rows[0].get("id") != trace_id:
@@ -775,74 +765,12 @@ def reconcile_openclaw_v3_gateway_restart(
             and second.get("message", {}).get("role") == "user"
             and (_message_text(second) or "").startswith("[System] Your previous turn was interrupted by a gateway restart")
             and third.get("message", {}).get("role") == "assistant"
-            and (trajectory_raw_text is None or _message_text(third) == trajectory_raw_text)
+            and _message_text(third) == raw_text
         ):
             matched.append((first, second, third))
     if len(matched) != 1:
         raise V3ContractError("session log does not contain one exact repair→restart→response chain")
-
     repair_message_row, restart_message_row, response_message_row = matched[0]
-    response_message = response_message_row.get("message")
-    if not isinstance(response_message, dict):
-        raise V3ContractError("session log response message is malformed")
-    raw_text = _message_text(response_message_row)
-    if not isinstance(raw_text, str):
-        raise V3ContractError("session log response does not contain one assistant text")
-
-    if session_ended_shape:
-        thread_id = end_data.get("threadId")
-        turn_id = end_data.get("turnId")
-        prompt_data = completed[2].get("data")
-        started_data = completed[0].get("data")
-        expected_prefix = f"codex-app-server:{thread_id}:{turn_id}:"
-        restart_message = restart_message_row.get("message", {})
-        expected_identities = (
-            (restart_message, "prompt"),
-            (response_message, "assistant"),
-        )
-        if (
-            not isinstance(thread_id, str) or not thread_id
-            or not isinstance(turn_id, str) or not turn_id
-            or not isinstance(prompt_data, dict)
-            or prompt_data.get("threadId") != thread_id
-            or prompt_data.get("turnId") != turn_id
-            or not isinstance(started_data, dict)
-            or started_data.get("threadId") != thread_id
-        ):
-            raise V3ContractError("session-ended continuation lacks one shared thread/turn identity")
-        for message, suffix in expected_identities:
-            mirror = message.get("__openclaw")
-            if (
-                message.get("idempotencyKey") != expected_prefix + suffix
-                or not isinstance(mirror, dict)
-                or mirror.get("mirrorOrigin") != "codex-app-server"
-                or mirror.get("mirrorIdentity") != f"{turn_id}:{suffix}"
-            ):
-                raise V3ContractError("session log continuation identity does not match session.ended")
-        if (
-            restart_message_row.get("parentId") != repair_message_row.get("id")
-            or response_message_row.get("parentId") != restart_message_row.get("id")
-            or any(not isinstance(row.get("id"), str) or not row.get("id") for row in matched[0])
-        ):
-            raise V3ContractError("session log continuation parent chain is invalid")
-        if (
-            response_message.get("api") != "openai-chatgpt-responses"
-            or response_message.get("provider") != "openai"
-            or response_message.get("model") != str(manifest["model"]).split("/", 1)[-1]
-            or response_message.get("stopReason") != "stop"
-        ):
-            raise V3ContractError("session log continuation provider completion is invalid")
-        raw_usage = response_message.get("usage")
-        usage_keys = {
-            "input": "input", "cache_read": "cacheRead", "cache_write": "cacheWrite",
-            "output": "output", "total": "totalTokens",
-        }
-    else:
-        raw_usage = data.get("usage") if isinstance(data, dict) else None
-        usage_keys = {
-            "input": "input", "cache_read": "cacheRead", "cache_write": "cacheWrite",
-            "output": "output", "total": "total",
-        }
 
     try:
         content = parse_json_object(raw_text)
@@ -854,9 +782,16 @@ def reconcile_openclaw_v3_gateway_restart(
         parse_error = None
         response_hash = stable_hash(content)
 
+    raw_usage = data.get("usage")
     if not isinstance(raw_usage, dict):
         raise V3ContractError("gateway continuation is missing provider usage")
-    usage_fields = {key: raw_usage.get(source, 0) for key, source in usage_keys.items()}
+    usage_fields = {
+        "input": raw_usage.get("input", 0),
+        "cache_read": raw_usage.get("cacheRead", 0),
+        "cache_write": raw_usage.get("cacheWrite", 0),
+        "output": raw_usage.get("output", 0),
+        "total": raw_usage.get("total", 0),
+    }
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in usage_fields.values()):
         raise V3ContractError("gateway continuation provider usage contains an invalid token count")
     provider_usage = {key: int(value) for key, value in usage_fields.items()}
@@ -864,13 +799,9 @@ def reconcile_openclaw_v3_gateway_restart(
         raise V3ContractError("gateway continuation provider usage total is inconsistent")
     try:
         continuation_started = datetime.fromisoformat(str(completed[0].get("ts", "")).replace("Z", "+00:00"))
-        completion_event = model_event if model_event is not None else end_event
-        continuation_completed = datetime.fromisoformat(str(completion_event.get("ts", "")).replace("Z", "+00:00"))
+        continuation_completed = datetime.fromisoformat(str(model_event.get("ts", "")).replace("Z", "+00:00"))
         interrupted_started = datetime.fromisoformat(str(interrupted[0].get("ts", "")).replace("Z", "+00:00"))
         journal_started = datetime.fromisoformat(str(started.get("timestamp", "")).replace("Z", "+00:00"))
-        if session_ended_shape:
-            restart_logged = datetime.fromisoformat(str(restart_message_row.get("timestamp", "")).replace("Z", "+00:00"))
-            response_logged = datetime.fromisoformat(str(response_message_row.get("timestamp", "")).replace("Z", "+00:00"))
     except ValueError as exc:
         raise V3ContractError("gateway restart trajectory contains an invalid timestamp") from exc
     if any(value.utcoffset() is None for value in (
@@ -881,12 +812,8 @@ def reconcile_openclaw_v3_gateway_restart(
     total_elapsed_ms = int((continuation_completed - interrupted_started).total_seconds() * 1000)
     if duration_ms < 0 or total_elapsed_ms < 0 or interrupted_started < journal_started:
         raise V3ContractError("gateway completion predates the interrupted repair")
-    if session_ended_shape and not (continuation_started <= restart_logged <= response_logged <= continuation_completed):
-        raise V3ContractError("session log continuation timestamps do not fit the successful gateway run")
-
-    evidence_event = model_event if model_event is not None else end_event
-    timestamp = str(evidence_event["ts"])
-    event_sha256 = hashlib.sha256(_canonical(evidence_event).encode()).hexdigest()
+    timestamp = str(model_event["ts"])
+    event_sha256 = hashlib.sha256(_canonical(model_event).encode()).hexdigest()
     usage_row = {
         "timestamp": timestamp,
         "run_id": manifest["run_id"],
@@ -895,9 +822,9 @@ def reconcile_openclaw_v3_gateway_restart(
         "role": role,
         "gateway_run_id": completed_run_id,
         "interrupted_gateway_run_id": interrupted_run_id,
-        "session_id": str(evidence_event.get("sessionId", "")),
+        "session_id": str(model_event.get("sessionId", "")),
         "provider": "openai",
-        "model": evidence_event["modelId"],
+        "model": model_event["modelId"],
         "duration_ms": duration_ms,
         "usage": provider_usage,
         "response_hash": response_hash,
@@ -922,9 +849,6 @@ def reconcile_openclaw_v3_gateway_restart(
         "response_hash": response_hash,
         "parse_error": parse_error,
         "trajectory_event_sha256": event_sha256,
-        "trajectory_completion_kind": (
-            "model.completed" if model_event is not None else "session.ended_success"
-        ),
     }
     ledger_path = Path(manifest["usage_ledger_path"])
     ledger = _read_jsonl(ledger_path)
@@ -991,7 +915,6 @@ def reconcile_openclaw_v3_gateway_restart(
             "session_log_path": str(session_log_path),
             "session_log_sha256": hashlib.sha256(session_log_path.read_bytes()).hexdigest(),
             "trace_id": trace_id,
-            "completion_kind": "model.completed" if model_event is not None else "session.ended_success",
             "completed_event_sha256": event_sha256,
             "repair_message_sha256": hashlib.sha256(_canonical(repair_message_row).encode()).hexdigest(),
             "restart_message_sha256": hashlib.sha256(_canonical(restart_message_row).encode()).hexdigest(),

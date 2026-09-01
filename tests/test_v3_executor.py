@@ -377,15 +377,15 @@ class V3ExecutorTests(unittest.TestCase):
                 {**common, "type": "prompt.submitted", "runId": interrupted_id, "ts": "2099-09-01T00:00:02Z", "data": {"prompt": truncated_repair}},
                 {**common, "type": "session.started", "runId": completed_id, "ts": "2099-09-01T00:01:00Z"},
                 {**common, "type": "context.compiled", "runId": completed_id, "ts": "2099-09-01T00:01:01Z", "data": {"prompt": "restart continuation"}},
-                {**common, "type": "prompt.submitted", "runId": completed_id, "ts": "2099-09-01T00:01:02Z", "data": {
-                    "prompt": "restart continuation", "threadId": "thread-continuation", "turnId": "turn-continuation",
+                {**common, "type": "prompt.submitted", "runId": completed_id, "ts": "2099-09-01T00:01:02Z", "data": {"prompt": "restart continuation"}},
+                {**common, "type": "model.completed", "runId": completed_id, "ts": "2099-09-01T00:02:00Z", "data": {
+                    "timedOut": False, "aborted": False, "yieldDetected": False,
+                    "promptError": None, "terminalError": None,
+                    "assistantTexts": [raw_text],
+                    "usage": {"input": 20, "cacheRead": 2, "cacheWrite": 0, "output": 5, "total": 27},
                 }},
-                {**common, "type": "session.ended", "runId": completed_id, "ts": "2099-09-01T00:02:01Z", "data": {
-                    "status": "success", "threadId": "thread-continuation", "turnId": "turn-continuation",
-                    "timedOut": False, "aborted": False, "promptError": None,
-                }},
+                {**common, "type": "session.ended", "runId": completed_id, "ts": "2099-09-01T00:02:01Z", "data": {"status": "success"}},
             ]
-            trajectory_rows[3]["data"] = {"threadId": "thread-continuation"}
             trajectory = root / "source.trajectory.jsonl"
             trajectory.write_text(
                 "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
@@ -429,18 +429,30 @@ class V3ExecutorTests(unittest.TestCase):
                     "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
                 )
 
-                session_rows[-1]["message"]["idempotencyKey"] = "codex-app-server:tampered"
-                session_log.write_text(
-                    "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
+                trajectory_rows[-2]["data"]["yieldDetected"] = True
+                trajectory.write_text(
+                    "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
                 )
-                with self.assertRaisesRegex(V3ContractError, "identity does not match"):
+                with self.assertRaisesRegex(V3ContractError, "completed provider response"):
                     reconcile_openclaw_v3_gateway_restart(
                         pair_dir, "theatre", trajectory, session_log,
                         interrupted_id, completed_id,
                     )
-                session_rows[-1]["message"]["idempotencyKey"] = (
-                    "codex-app-server:thread-continuation:turn-continuation:assistant"
+                trajectory_rows[-2]["data"]["yieldDetected"] = False
+                trajectory.write_text(
+                    "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
                 )
+
+                session_rows[-1]["message"]["content"] = "tampered response"
+                session_log.write_text(
+                    "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(V3ContractError, "one exact repair"):
+                    reconcile_openclaw_v3_gateway_restart(
+                        pair_dir, "theatre", trajectory, session_log,
+                        interrupted_id, completed_id,
+                    )
+                session_rows[-1]["message"]["content"] = raw_text
                 session_log.write_text(
                     "".join(json.dumps(row) + "\n" for row in session_rows[:-1]), encoding="utf-8"
                 )
