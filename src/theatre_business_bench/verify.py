@@ -42,11 +42,23 @@ def _file_record(path: Path) -> dict[str, Any]:
     }
 
 
-def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
-    raw = "".join(
+def _jsonl_bytes(rows: list[dict[str, Any]]) -> bytes:
+    return "".join(
         json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
     ).encode()
-    return hashlib.sha256(raw).hexdigest()
+
+
+def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(_jsonl_bytes(rows)).hexdigest()
+
+
+def _jsonl_record(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = _jsonl_bytes(rows)
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "rows": len(rows),
+    }
 
 
 def _restart_protected_records(
@@ -143,13 +155,21 @@ def _verify_gateway_restart_transaction(
         or journal_row.get("outcome") != "gateway_restart_recovery_terminal"
     ):
         errors.append(f"{arm}: gateway-restart transaction rows exceed the receipt")
+    observed_files: dict[str, dict[str, Any]] = {}
     for name, path in paths.items():
         target_rows = rows.get(name)
         source_record = source["files"][name]
+        target_record = _jsonl_record(target_rows) if isinstance(target_rows, list) else {}
+        if name == "ledger" and isinstance(target_rows, list):
+            current_raw = path.read_bytes() if path.exists() else b""
+            current_record = target_record if current_raw.startswith(_jsonl_bytes(target_rows)) else _file_record(path)
+        else:
+            current_record = _file_record(path)
+        observed_files[name] = current_record
         if (
             not isinstance(target_rows, list)
             or _jsonl_sha256(target_rows) != target["files"][name]
-            or _file_record(path).get("sha256") != target["files"][name]
+            or current_record.get("sha256") != target["files"][name]
             or len(target_rows) != int(source_record.get("rows", -1)) + 1
         ):
             errors.append(f"{arm}: gateway-restart {name} transaction hash mismatch")
@@ -220,7 +240,7 @@ def _verify_gateway_restart_transaction(
     if protected != source.get("protected_artifacts"):
         errors.append(f"{arm}: gateway-restart reconciliation changed protected evidence")
     observed_final = {
-        "files": {name: _file_record(path) for name, path in paths.items()},
+        "files": observed_files,
         "flow": _file_record(run_dir / "flow.json"),
         "pair": _file_record(pair_path),
         "protected_artifacts": protected,

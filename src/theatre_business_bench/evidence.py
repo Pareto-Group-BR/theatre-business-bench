@@ -64,11 +64,23 @@ def _file_record(path: Path) -> dict[str, Any]:
     }
 
 
-def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
-    raw = "".join(
+def _jsonl_bytes(rows: list[dict[str, Any]]) -> bytes:
+    return "".join(
         json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
     ).encode()
-    return hashlib.sha256(raw).hexdigest()
+
+
+def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(_jsonl_bytes(rows)).hexdigest()
+
+
+def _jsonl_record(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    raw = _jsonl_bytes(rows)
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "rows": len(rows),
+    }
 
 
 def _json_sha256(value: Any) -> str:
@@ -452,13 +464,20 @@ def _finish_v3_restart_reconciliation(
         target_rows = rows[name]
         if not isinstance(target_rows, list) or _jsonl_sha256(target_rows) != target["files"][name]:
             raise V3ContractError(f"gateway-restart {name} target hash is invalid")
-        current = _file_record(path)["sha256"]
+        current_record = _file_record(path)
+        current = current_record["sha256"]
         if current == source["files"][name]["sha256"]:
             if not resume:
                 raise V3ContractError(
                     f"completed gateway-restart reconciliation left {name} uncommitted"
                 )
             _atomic_jsonl(path, target_rows)
+        elif name == "ledger":
+            current_raw = path.read_bytes() if path.exists() else b""
+            if not current_raw.startswith(_jsonl_bytes(target_rows)):
+                raise V3ContractError(
+                    "gateway-restart ledger changed before its append-only continuation"
+                )
         elif current != target["files"][name]:
             raise V3ContractError(
                 f"gateway-restart {name} changed outside the prepared transaction"
@@ -520,8 +539,12 @@ def _finish_v3_restart_reconciliation(
     protected = _restart_protected_artifacts(pair_dir, run_dir, other_run_dir)
     if protected != source.get("protected_artifacts"):
         raise V3ContractError("protected evidence changed during gateway-restart reconciliation")
+    final_files = {
+        name: _jsonl_record(rows[name]) if name == "ledger" else _file_record(path)
+        for name, path in paths.items()
+    }
     final = {
-        "files": {name: _file_record(path) for name, path in paths.items()},
+        "files": final_files,
         "flow": _file_record(flow_path),
         "pair": _file_record(pair_path),
         "protected_artifacts": protected,

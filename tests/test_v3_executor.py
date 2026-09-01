@@ -519,6 +519,27 @@ class V3ExecutorTests(unittest.TestCase):
             self.assertEqual(report["status"], "passed", report["errors"])
             self.assertEqual(report["runs"]["theatre"]["first_pass_contract_failures"], 1)
             self.assertEqual(report["runs"]["theatre"]["terminal_repair_failures"], 1)
+            ledger_path = Path(read_json(theatre / "manifest.json")["usage_ledger_path"])
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"run_id": "later-official-run"}, sort_keys=True) + "\n")
+            appended_ledger = ledger_path.read_bytes()
+            appended = verify_pair(pair_dir)
+            self.assertEqual(appended["status"], "passed", appended["errors"])
+            with self._official_lock(root):
+                third = reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
+                )
+            self.assertEqual(first, third)
+            self.assertEqual(ledger_path.read_bytes(), appended_ledger)
+
+            ledger_path.write_bytes(b" " + appended_ledger)
+            changed_prefix = verify_pair(pair_dir)
+            self.assertEqual(changed_prefix["status"], "failed")
+            self.assertIn(
+                "theatre: gateway-restart ledger transaction hash mismatch",
+                changed_prefix["errors"],
+            )
+            ledger_path.write_bytes(appended_ledger)
             receipt_path = theatre / "gateway-restart-reconciliation.json"
             receipt = read_json(receipt_path)
             receipt["provider_usage"]["total"] += 1
