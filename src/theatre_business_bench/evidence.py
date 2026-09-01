@@ -707,24 +707,23 @@ def reconcile_openclaw_v3_gateway_restart(
             raise V3ContractError("gateway event provider/model differs from the frozen manifest")
 
     model_event = completed[3]
-    if completed[-1].get("data", {}).get("status") != "completed":
-        raise V3ContractError("gateway continuation does not end as completed")
+    end_data = completed[-1].get("data")
+    if not isinstance(end_data, dict) or end_data.get("status") not in ("completed", "success"):
+        raise V3ContractError("gateway continuation does not end successfully")
+    if any(end_data.get(key) not in (False, None) for key in (
+        "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
+    )):
+        raise V3ContractError("gateway continuation session.ended reports failure")
+
     data = model_event.get("data")
-    if not isinstance(data, dict) or any(data.get(key) not in (False, None) for key in ("timedOut", "aborted", "promptError")):
+    if not isinstance(data, dict) or any(data.get(key) not in (False, None) for key in (
+        "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
+    )):
         raise V3ContractError("gateway continuation is not one completed provider response")
     texts = data.get("assistantTexts")
     if not isinstance(texts, list) or len(texts) != 1 or not isinstance(texts[0], str):
         raise V3ContractError("gateway continuation must contain exactly one assistant text")
     raw_text = texts[0]
-    try:
-        content = parse_json_object(raw_text)
-    except ModelTransportError as exc:
-        content = None
-        parse_error: str | None = str(exc)
-        response_hash = stable_hash(raw_text)
-    else:
-        parse_error = None
-        response_hash = stable_hash(content)
 
     session_rows = _read_jsonl(session_log_path)
     if not session_rows or session_rows[0].get("type") != "session" or session_rows[0].get("id") != trace_id:
@@ -771,6 +770,17 @@ def reconcile_openclaw_v3_gateway_restart(
             matched.append((first, second, third))
     if len(matched) != 1:
         raise V3ContractError("session log does not contain one exact repair→restart→response chain")
+    repair_message_row, restart_message_row, response_message_row = matched[0]
+
+    try:
+        content = parse_json_object(raw_text)
+    except ModelTransportError as exc:
+        content = None
+        parse_error: str | None = str(exc)
+        response_hash = stable_hash(raw_text)
+    else:
+        parse_error = None
+        response_hash = stable_hash(content)
 
     raw_usage = data.get("usage")
     if not isinstance(raw_usage, dict):
@@ -802,7 +812,6 @@ def reconcile_openclaw_v3_gateway_restart(
     total_elapsed_ms = int((continuation_completed - interrupted_started).total_seconds() * 1000)
     if duration_ms < 0 or total_elapsed_ms < 0 or interrupted_started < journal_started:
         raise V3ContractError("gateway completion predates the interrupted repair")
-
     timestamp = str(model_event["ts"])
     event_sha256 = hashlib.sha256(_canonical(model_event).encode()).hexdigest()
     usage_row = {
@@ -885,7 +894,6 @@ def reconcile_openclaw_v3_gateway_restart(
     final_pair = deepcopy(pair)
     final_pair.update(deepcopy(pair_transition))
 
-    repair_message_row, restart_message_row, response_message_row = matched[0]
     receipt = {
         "schema_version": 1,
         "status": "prepared_gateway_restart_reconciliation",

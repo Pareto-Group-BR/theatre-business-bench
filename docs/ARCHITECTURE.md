@@ -96,6 +96,10 @@ No returned action is applied and the repair cannot be retried. The receipt
 binds both gateway run ids, both source-file hashes, the completed event, the
 three exact session messages, provider usage and the zero-turn/zero-decision
 claim; `verify-pair` confronts those bindings offline.
+The observed OpenClaw continuation keeps the exact `model.completed` event and
+ends with `session.ended/status=success`; the legacy `completed` status remains
+accepted. Timeout, abort, yield, prompt/terminal error, response mismatch, or
+any other terminal status is rejected before a receipt or ledger write.
 The transition uses the same global lock as every official runner and persists
 a prepared intent before changing any ledger. Each subsequent write accepts
 only the exact source or exact planned target hash, so a restart of the
