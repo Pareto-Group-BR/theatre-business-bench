@@ -137,6 +137,21 @@ results or winners.
 See [`docs/EXPERIMENT_PROTOCOL_V3.md`](docs/EXPERIMENT_PROTOCOL_V3.md) and
 [`preregistration/v3.json`](preregistration/v3.json).
 
+After all five seeds are terminal, the campaign boundary is one deterministic,
+read-only renderer. It requires all five official seeds and green replay before
+writing outside the immutable run root. Economic mean, median, seed wins and
+the exact paired-bootstrap interval exist only when all five pairs produced
+final `result.json`; otherwise the bundle publishes reliability, repairs,
+usage and terminal causes while keeping every aggregate economic field null.
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli render-v3-campaign \
+  --run-root /absolute/durable/path/theatre-business-bench-v3 \
+  --json-out /tmp/v3-campaign.json \
+  --markdown-out /tmp/V3_CAMPAIGN.md \
+  --html-out /tmp/v3-campaign.html
+```
+
 After this executor is reviewed, merged, published on `main`, and a complete
 official seed can be run as one indivisible unit, its lifecycle is:
 
