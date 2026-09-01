@@ -14,18 +14,22 @@
 - A v2 autônoma terminou com cinco `failed_contract`, zero resultado econômico
   e evidência terminal imutável; seeds 2201–2205 nunca devem ser retomadas.
 - A v3 está pré-registrada, com executor publicado e campanha oficial iniciada
-  em seeds novas 2301–2305. Seed 2301 avançou de forma pareada até D72 antes de
-  um gateway restart interromper o único reparo do controle. O journal incompleto
-  bloqueia replay/retomada até reconciliação forense; não existe resultado,
-  vencedor ou agregado v3.
-- Um auto-continue da sessão produziu bytes e usage depois do restart. Esses
-  bytes não podem virar ação: `reconcile-openclaw-v3-gateway-restart` exige
-  trajetória + session log exatos, contabiliza a continuação e terminaliza a
-  seed sem turno de simulador. O formato observado exige `model.completed`
-  seguido de `session.ended/status=success`, com a mesma resposta comprovada
-  na sessão; ausência, adulteração, timeout/abort/yield/erro terminal ou fim
-  não-success falham sem escrita. Depois disso, a
-  campanha segue pelas seeds restantes; a seed afetada permanece falha observada.
+  em seeds novas 2301–2305. A seed 2301 foi terminalizada honestamente como
+  `failed_contract`: o auto-continue posterior ao restart foi contabilizado,
+  mas nunca aplicado ao simulador. A seed 2302 avançou de forma pareada até
+  controle D96/Theatre D93; um novo restart deixou a tentativa original do
+  Personagem aberta no journal, sem evento ou mensagem OpenClaw posterior ao
+  `started`. Não existe resultado, vencedor ou agregado v3.
+- Há duas formas forenses distintas e ambas terminam a seed sem retry. Quando
+  um auto-continue produz bytes e usage, `reconcile-openclaw-v3-gateway-restart`
+  exige trajetória + session log exatos, contabiliza a continuação e adiciona
+  zero turno. Quando nem `session.started` foi observado,
+  `reconcile-openclaw-v3-undispatched-attempt` exige os logs completos da sessão,
+  confronta todas as chamadas anteriores e prova que tudo termina antes do
+  journal aberto; então adiciona zero chamada, zero usage, zero decisão e zero
+  turno. Ausência, adulteração ou evidência posterior falha antes de qualquer
+  escrita. A seed afetada permanece falha observada e a campanha segue somente
+  pelos gates canônicos.
 - As seções 10 e 11 permanecem deliberadamente como diagnóstico do checkpoint
   D189 que motivou o desenho v2; não devem ser lidas como estado corrente.
 

@@ -111,6 +111,28 @@ receipt freezes and verifies its exact transaction prefix while allowing only
 later append-only rows from subsequent official calls; changing any byte in the
 frozen prefix still fails closed.
 
+There is a distinct fail-closed shape in which the restart happens after the
+local write-ahead `started` row but before OpenClaw records `session.started`.
+`reconcile-openclaw-v3-undispatched-attempt` is the only transition for that
+shape. It accepts only the final original attempt, with no `pending_invocation`,
+usage, decision, or failure evidence. The supplied full role trajectory must be
+a contiguous sequence of successful five-event gateway runs, and the full
+session log must contain the matching parent-linked user/assistant pairs. Each
+prompt, response, provider/model identity, token count, gateway id, session id,
+and previously persisted benchmark usage is confronted. Every event and
+message must be strictly earlier than the journal start, so a partial or later
+dispatch fails before any write.
+
+The transaction appends one `transport_failed` journal row and terminalizes the
+run and pair without adding provider usage, model evidence, invocation, action,
+or simulator turn. It persists intent before those three writes, accepts only
+the exact source or target hash on restart, protects both arms and the run's
+usage/failure files, and freezes the global ledger prefix while permitting
+later rows only for other runs. `verify-pair` independently reconstructs the
+source and target state, checks available source-file boundaries, and rejects a
+missing/tampered receipt or any later ledger row attributed to the terminal
+run. The transition is not a retry mechanism.
+
 ## Subscription transport
 
 The runner invokes `openclaw agent` through the Gateway with:
