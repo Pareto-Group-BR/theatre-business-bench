@@ -11,9 +11,18 @@
   `verify-pair`; controle US$ 7.016,88, Theatre US$ 4.437,91, diferença
   Theatre − controle de -US$ 2.578,97.
 - O resultado é piloto, não veredito oficial de cinco seeds.
-- A v2 autônoma está pré-registrada em `preregistration/v2.json`, com protocolo,
-  cinco prompts, corpus compartilhado e auditoria de paridade. Nenhuma
-  inferência v2 foi iniciada.
+- A v2 autônoma terminou com cinco `failed_contract`, zero resultado econômico
+  e evidência terminal imutável; seeds 2201–2205 nunca devem ser retomadas.
+- A v3 está pré-registrada, com executor publicado e campanha oficial iniciada
+  em seeds novas 2301–2305. Seed 2301 avançou de forma pareada até D72 antes de
+  um gateway restart interromper o único reparo do controle. O journal incompleto
+  bloqueia replay/retomada até reconciliação forense; não existe resultado,
+  vencedor ou agregado v3.
+- Um auto-continue da sessão produziu bytes e usage depois do restart. Esses
+  bytes não podem virar ação: `reconcile-openclaw-v3-gateway-restart` exige
+  trajetória + session log exatos, contabiliza a continuação e terminaliza a
+  seed sem turno de simulador. Depois disso, a campanha segue pelas seeds
+  restantes; a seed afetada permanece falha observada.
 - As seções 10 e 11 permanecem deliberadamente como diagnóstico do checkpoint
   D189 que motivou o desenho v2; não devem ser lidas como estado corrente.
 

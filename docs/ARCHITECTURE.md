@@ -84,6 +84,26 @@ duplicate attempts, and deterministically replays only accepted responses.
 Parse failures, transport or provider-quota failures, model drift, and a second
 structural failure become loud terminal evidence without a simulator turn.
 
+If a gateway restart occurs between the journal `started` row and the runner's
+completion write, an OpenClaw session can contain a second, automatic
+continuation even though the benchmark process is gone. The verifier rejects
+that incomplete journal by default. The only recovery path is the forensic
+`reconcile-openclaw-v3-gateway-restart` transition: it requires both immutable
+trajectory events and the full session log, proves the exact frozen repair
+message immediately precedes the restart marker and returned bytes, charges the
+completed continuation, and terminally records a transport-recovery failure.
+No returned action is applied and the repair cannot be retried. The receipt
+binds both gateway run ids, both source-file hashes, the completed event, the
+three exact session messages, provider usage and the zero-turn/zero-decision
+claim; `verify-pair` confronts those bindings offline.
+The transition uses the same global lock as every official runner and persists
+a prepared intent before changing any ledger. Each subsequent write accepts
+only the exact source or exact planned target hash, so a restart of the
+reconciler resumes without duplicate usage or partial evidence. Final
+verification reconstructs the source rows and state and proves that simulator,
+accepted decisions, the other arm, activation, and pre-registration were not
+changed.
+
 ## Subscription transport
 
 The runner invokes `openclaw agent` through the Gateway with:
