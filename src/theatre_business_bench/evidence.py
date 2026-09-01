@@ -102,7 +102,7 @@ def _require_official_lock() -> None:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (ValueError, OSError) as exc:
         raise V3ContractError(
-            "v3 gateway-restart reconciliation requires the canonical global-lock wrapper"
+            "v3 forensic reconciliation requires the canonical global-lock wrapper"
         ) from exc
 
 
@@ -996,5 +996,703 @@ def reconcile_openclaw_v3_gateway_restart(
     }
     atomic_json(receipt_path, receipt)
     return _finish_v3_restart_reconciliation(
+        pair_dir, run_dir, other_run_dir, receipt_path, receipt
+    )
+
+
+_UNDISPATCHED_REASON = (
+    "gateway restart left a write-ahead attempt with no OpenClaw dispatch observed; "
+    "terminalized without retry"
+)
+
+
+def _undispatched_protected_artifacts(
+    pair_dir: Path, run_dir: Path, other_run_dir: Path
+) -> dict[str, dict[str, Any]]:
+    protected = _restart_protected_artifacts(pair_dir, run_dir, other_run_dir)
+    protected.update({
+        "run/usage.jsonl": _file_record(run_dir / "usage.jsonl"),
+        "run/model-failures.jsonl": _file_record(run_dir / "model-failures.jsonl"),
+    })
+    return protected
+
+
+def _forensic_timestamp(value: Any, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise V3ContractError(f"{label} contains an invalid timestamp") from exc
+    if parsed.utcoffset() is None:
+        raise V3ContractError(f"{label} timestamp must include an explicit timezone")
+    return parsed
+
+
+def _provider_usage_from_trajectory(data: dict[str, Any], label: str) -> dict[str, int]:
+    raw = data.get("usage")
+    if not isinstance(raw, dict):
+        raise V3ContractError(f"{label} is missing provider usage")
+    fields = {
+        "input": raw.get("input", 0),
+        "cache_read": raw.get("cacheRead", 0),
+        "cache_write": raw.get("cacheWrite", 0),
+        "output": raw.get("output", 0),
+        "total": raw.get("total", 0),
+    }
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in fields.values()
+    ):
+        raise V3ContractError(f"{label} contains an invalid provider token count")
+    usage = {key: int(value) for key, value in fields.items()}
+    if usage["total"] != sum(
+        usage[key] for key in ("input", "cache_read", "cache_write", "output")
+    ):
+        raise V3ContractError(f"{label} provider usage total is inconsistent")
+    return usage
+
+
+def _session_usage(row: dict[str, Any], label: str) -> dict[str, int]:
+    message = row.get("message")
+    raw = message.get("usage") if isinstance(message, dict) else None
+    if not isinstance(raw, dict):
+        raise V3ContractError(f"{label} is missing assistant usage")
+    fields = {
+        "input": raw.get("input", 0),
+        "cache_read": raw.get("cacheRead", 0),
+        "cache_write": raw.get("cacheWrite", 0),
+        "output": raw.get("output", 0),
+        "total": raw.get("totalTokens", 0),
+    }
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in fields.values()
+    ):
+        raise V3ContractError(f"{label} contains an invalid assistant token count")
+    usage = {key: int(value) for key, value in fields.items()}
+    if usage["total"] != sum(
+        usage[key] for key in ("input", "cache_read", "cache_write", "output")
+    ):
+        raise V3ContractError(f"{label} assistant usage total is inconsistent")
+    return usage
+
+
+def _trajectory_prompt_matches(expected: str, observed: Any) -> bool:
+    if observed == expected:
+        return True
+    return (
+        isinstance(observed, str)
+        and len(observed) == 20_001
+        and observed.endswith("…")
+        and len(expected) > 20_000
+        and observed[:-1] == expected[:20_000]
+    )
+
+
+def _ledger_prefix_matches(
+    ledger_path: Path, prefix: dict[str, Any], run_id: str
+) -> bool:
+    if not ledger_path.is_file():
+        return prefix.get("sha256") is None and prefix.get("bytes") == 0
+    raw = ledger_path.read_bytes()
+    try:
+        size = int(prefix.get("bytes", -1))
+    except (TypeError, ValueError):
+        return False
+    if size < 0 or len(raw) < size:
+        return False
+    original = raw[:size]
+    expected_hash = prefix.get("sha256")
+    if expected_hash is None:
+        if original:
+            return False
+    elif hashlib.sha256(original).hexdigest() != expected_hash:
+        return False
+    suffix = raw[size:]
+    if suffix and original and not original.endswith(b"\n"):
+        return False
+    for line in suffix.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(row, dict) or row.get("run_id") == run_id:
+            return False
+    return True
+
+
+def _finish_v3_undispatched_reconciliation(
+    pair_dir: Path,
+    run_dir: Path,
+    other_run_dir: Path,
+    receipt_path: Path,
+    receipt: dict[str, Any],
+    *,
+    resume: bool = True,
+) -> dict[str, Any]:
+    transaction = receipt.get("transaction")
+    if not isinstance(transaction, dict):
+        raise V3ContractError("undispatched-attempt receipt lacks its durable transaction")
+    source = transaction.get("source", {})
+    target = transaction.get("target", {})
+    rows = transaction.get("rows", {})
+    if set(rows) != {"journal"} or set(source.get("files", {})) != {"journal"}:
+        raise V3ContractError("undispatched-attempt transaction has an invalid file set")
+    if set(target.get("files", {})) != {"journal"}:
+        raise V3ContractError("undispatched-attempt transaction target set is invalid")
+    journal_rows = rows.get("journal")
+    if not isinstance(journal_rows, list) or not journal_rows:
+        raise V3ContractError("undispatched-attempt transaction lacks its terminal journal row")
+    source_record = source["files"]["journal"]
+    if len(journal_rows) != int(source_record.get("rows", -1)) + 1:
+        raise V3ContractError("undispatched-attempt transaction must append one journal row")
+    if source_record.get("sha256") is None:
+        if journal_rows[:-1]:
+            raise V3ContractError("undispatched-attempt journal source absence is inconsistent")
+    elif _jsonl_sha256(journal_rows[:-1]) != source_record.get("sha256"):
+        raise V3ContractError("undispatched-attempt transaction changed prior journal rows")
+
+    terminal_row = journal_rows[-1]
+    expected_terminal = {
+        "attempt_id": receipt.get("attempt_id"),
+        "attempt_kind": "original",
+        "turn_index": receipt.get("turn_index"),
+        "state_hash": receipt.get("state_hash"),
+        "role": receipt.get("role"),
+        "event": "transport_failed",
+        "timestamp": receipt.get("reconciled_at"),
+        "error": _UNDISPATCHED_REASON,
+        "evidence_source": "openclaw_undispatched_attempt_reconciliation",
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    }
+    if terminal_row != expected_terminal:
+        raise V3ContractError("undispatched-attempt terminal row exceeds its forensic receipt")
+    expected_transaction_id = stable_hash({
+        "pair_id": receipt.get("pair_id"),
+        "run_id": receipt.get("run_id"),
+        "attempt_id": receipt.get("attempt_id"),
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    })
+    if transaction.get("transaction_id") != expected_transaction_id:
+        raise V3ContractError("undispatched-attempt transaction id does not bind its evidence")
+    if _jsonl_sha256(journal_rows) != target["files"]["journal"]:
+        raise V3ContractError("undispatched-attempt journal target hash is invalid")
+
+    journal_path = run_dir / "call-journal.jsonl"
+    current_journal = _file_record(journal_path)["sha256"]
+    if current_journal == source_record.get("sha256"):
+        if not resume:
+            raise V3ContractError("completed undispatched-attempt receipt left journal uncommitted")
+        _atomic_jsonl(journal_path, journal_rows)
+    elif current_journal != target["files"]["journal"]:
+        raise V3ContractError("call journal changed outside the prepared undispatched transaction")
+
+    ledger_path = Path(transaction.get("ledger_path", "")).resolve()
+    expected_ledger = Path(read_json(run_dir / "manifest.json")["usage_ledger_path"]).resolve()
+    if ledger_path != expected_ledger:
+        raise V3ContractError("undispatched-attempt transaction targets the wrong usage ledger")
+    ledger_prefix = source.get("ledger_prefix")
+    if not isinstance(ledger_prefix, dict) or not _ledger_prefix_matches(
+        ledger_path, ledger_prefix, str(receipt.get("run_id"))
+    ):
+        raise V3ContractError("usage ledger changed for the reconciled run after its no-usage boundary")
+
+    expected_flow_transition = {
+        "status": "failed_contract",
+        "updated_at": receipt.get("reconciled_at"),
+        "contract_failure": {
+            "phase": receipt.get("role"),
+            "message": _UNDISPATCHED_REASON,
+        },
+    }
+    other_arm = "theatre" if receipt.get("arm") == "control" else "control"
+    expected_pair_transition = {
+        "next_arm": other_arm,
+        "status": "failed_contract",
+        "last_arm": receipt.get("arm"),
+        "last_result": {
+            "status": "failed_contract",
+            "reason": _UNDISPATCHED_REASON,
+            "run_dir": str(run_dir),
+            "provider_calls_added": 0,
+            "provider_usage_rows_added": 0,
+            "simulator_turns_added": 0,
+        },
+        "updated_at": receipt.get("reconciled_at"),
+    }
+    if (
+        transaction.get("flow_transition") != expected_flow_transition
+        or transaction.get("pair_transition") != expected_pair_transition
+    ):
+        raise V3ContractError("undispatched-attempt transaction exceeds its allowed state transition")
+
+    flow_path = run_dir / "flow.json"
+    flow = read_json(flow_path)
+    flow_sha = _file_record(flow_path)["sha256"]
+    if flow_sha == source["flow"]["sha256"]:
+        if not resume:
+            raise V3ContractError("completed undispatched-attempt receipt left flow uncommitted")
+        flow.update(deepcopy(expected_flow_transition))
+        atomic_json(flow_path, flow)
+    elif flow_sha != target.get("flow"):
+        raise V3ContractError("run flow changed outside the prepared undispatched transaction")
+
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    pair_sha = _file_record(pair_path)["sha256"]
+    if pair_sha == source["pair"]["sha256"]:
+        if not resume:
+            raise V3ContractError("completed undispatched-attempt receipt left pair uncommitted")
+        pair.update(deepcopy(expected_pair_transition))
+        atomic_json(pair_path, pair)
+    elif pair_sha != target.get("pair"):
+        raise V3ContractError("pair changed outside the prepared undispatched transaction")
+
+    protected = _undispatched_protected_artifacts(pair_dir, run_dir, other_run_dir)
+    if protected != source.get("protected_artifacts"):
+        raise V3ContractError("protected evidence changed during undispatched reconciliation")
+    final = {
+        "files": {"journal": _file_record(journal_path)},
+        "flow": _file_record(flow_path),
+        "pair": _file_record(pair_path),
+        "ledger_prefix": ledger_prefix,
+        "protected_artifacts": protected,
+    }
+    if (
+        final["files"]["journal"]["sha256"] != target["files"]["journal"]
+        or final["flow"]["sha256"] != target.get("flow")
+        or final["pair"]["sha256"] != target.get("pair")
+    ):
+        raise V3ContractError("undispatched-attempt transaction did not persist its exact terminal state")
+    if not resume:
+        if receipt.get("status") != "reconciled_failed_contract" or receipt.get("final") != final:
+            raise V3ContractError("completed undispatched-attempt receipt was modified")
+        return receipt
+    completed = deepcopy(receipt)
+    completed["status"] = "reconciled_failed_contract"
+    completed["final"] = final
+    atomic_json(receipt_path, completed)
+    return completed
+
+
+def reconcile_openclaw_v3_undispatched_attempt(
+    pair_dir: Path,
+    arm: str,
+    trajectory_path: Path,
+    session_log_path: Path,
+) -> dict[str, Any]:
+    """Terminalize one v3 write-ahead attempt for which no dispatch is observed.
+
+    This transition is deliberately narrower than gateway continuation recovery:
+    it accepts only the final original attempt, proves that the complete role
+    trajectory and session log end before its journal timestamp, adds no usage,
+    decision, failure, invocation, or simulator turn, and never authorizes retry.
+    """
+    _require_official_lock()
+    pair_dir = pair_dir.resolve()
+    trajectory_path = trajectory_path.resolve()
+    session_log_path = session_log_path.resolve()
+    if arm not in ("control", "theatre"):
+        raise V3ContractError("arm must be control or theatre")
+    if not trajectory_path.is_file() or not session_log_path.is_file():
+        raise V3ContractError("undispatched reconciliation requires both immutable source files")
+
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    if pair.get("protocol_version") != "v3" or pair.get("official") is not True:
+        raise V3ContractError("undispatched reconciliation requires an official v3 pair")
+    run_dir = Path(pair[f"{arm}_run"]).resolve()
+    other_arm = "theatre" if arm == "control" else "control"
+    other_run_dir = Path(pair[f"{other_arm}_run"]).resolve()
+    manifest = read_json(run_dir / "manifest.json")
+    flow_path = run_dir / "flow.json"
+    flow = read_json(flow_path)
+    if manifest.get("protocol_version") != "v3" or manifest.get("official") is not True:
+        raise V3ContractError("selected run is not an official v3 run")
+
+    receipt_path = run_dir / "undispatched-attempt-reconciliation.json"
+    trajectory_sha256 = hashlib.sha256(trajectory_path.read_bytes()).hexdigest()
+    session_log_sha256 = hashlib.sha256(session_log_path.read_bytes()).hexdigest()
+    if receipt_path.exists():
+        receipt = read_json(receipt_path)
+        source = receipt.get("source", {})
+        if (
+            source.get("trajectory_sha256") != trajectory_sha256
+            or source.get("session_log_sha256") != session_log_sha256
+        ):
+            raise V3ContractError("source bytes differ from the existing undispatched receipt")
+        if receipt.get("status") == "prepared_undispatched_attempt_reconciliation":
+            return _finish_v3_undispatched_reconciliation(
+                pair_dir, run_dir, other_run_dir, receipt_path, receipt
+            )
+        if receipt.get("status") != "reconciled_failed_contract":
+            raise V3ContractError("existing undispatched-attempt receipt has an invalid status")
+        return _finish_v3_undispatched_reconciliation(
+            pair_dir, run_dir, other_run_dir, receipt_path, receipt, resume=False
+        )
+    if (run_dir / "gateway-restart-reconciliation.json").exists():
+        raise V3ContractError("selected run already has a different gateway-restart receipt")
+
+    role = flow.get("phase")
+    allowed_roles = (
+        {"control"}
+        if arm == "control"
+        else {"critic", "consciousness", "planner", "actor"}
+    )
+    if (
+        role not in allowed_roles
+        or flow.get("current_step") != "model_roles"
+        or flow.get("status") != "running"
+        or flow.get("pending_invocation") is not None
+    ):
+        raise V3ContractError("selected run is not stopped at an original v3 role attempt")
+
+    journal = _read_jsonl(run_dir / "call-journal.jsonl")
+    usage = _read_jsonl(run_dir / "usage.jsonl")
+    decisions = _read_jsonl(run_dir / "model-decisions.jsonl")
+    failures = _read_jsonl(run_dir / "model-failures.jsonl")
+    open_attempts = [
+        row for row in journal
+        if row.get("event") == "started"
+        and sum(item.get("attempt_id") == row.get("attempt_id") for item in journal) == 1
+    ]
+    if len(open_attempts) != 1 or open_attempts[0] != journal[-1]:
+        raise V3ContractError("run must end in exactly one incomplete call-journal attempt")
+    started = open_attempts[0]
+    attempt_id = started.get("attempt_id")
+    state = read_json(run_dir / "state.json")
+    expected_started = {
+        "attempt_id": attempt_id,
+        "attempt_kind": "original",
+        "event": "started",
+        "role": role,
+        "state_hash": stable_hash(state),
+        "timestamp": started.get("timestamp"),
+        "turn_index": flow.get("turn_index"),
+    }
+    if started != expected_started:
+        raise V3ContractError("incomplete journal row is not the exact active original attempt")
+    if (
+        started.get("state_hash") != flow.get("turn_state_hash")
+        or any(row.get("attempt_id") == attempt_id for row in [*usage, *decisions, *failures])
+    ):
+        raise V3ContractError("incomplete attempt has state or provider evidence inconsistent with no dispatch")
+    try:
+        serial = int(str(attempt_id).rsplit(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise V3ContractError("incomplete original attempt id lacks its durable serial") from exc
+    if serial != flow.get("provider_attempt_serial"):
+        raise V3ContractError("incomplete original attempt is not the latest provider serial")
+
+    control_state = read_json(Path(pair["control_run"]) / "state.json")
+    theatre_state = read_json(Path(pair["theatre_run"]) / "state.json")
+    if control_state.get("terminated") and theatre_state.get("terminated"):
+        selected_arm = None
+    elif control_state.get("terminated"):
+        selected_arm = "theatre"
+    elif theatre_state.get("terminated"):
+        selected_arm = "control"
+    elif int(control_state["day"]) < int(theatre_state["day"]):
+        selected_arm = "control"
+    elif int(theatre_state["day"]) < int(control_state["day"]):
+        selected_arm = "theatre"
+    else:
+        selected_arm = pair.get("next_arm")
+    if pair.get("status") not in ("ready", "running", "paused_quota") or selected_arm != arm:
+        raise V3ContractError("pair is not stopped at the selected arm")
+
+    from .verify import verify_pair
+
+    expected_error = f"{arm}: call journal attempt {attempt_id} is incomplete or reordered"
+    verification = verify_pair(pair_dir)
+    if verification.get("errors") != [expected_error]:
+        raise V3ContractError(
+            "pair has integrity errors beyond the selected incomplete attempt: "
+            + "; ".join(verification.get("errors", []))
+        )
+
+    journal_started = _forensic_timestamp(started.get("timestamp"), "call journal")
+    trajectory_rows = _read_jsonl(trajectory_path)
+    if not trajectory_rows:
+        raise V3ContractError("trajectory contains no completed prior role call")
+    safe_run = str(manifest["run_id"]).lower().replace("_", "-").replace(":", "-")
+    expected_session_key = f"agent:{manifest['agent_id']}:bench-{safe_run}-{role}"
+    trace_ids = {str(row.get("traceId", "")) for row in trajectory_rows}
+    if len(trace_ids) != 1 or "" in trace_ids:
+        raise V3ContractError("trajectory does not contain one explicit OpenClaw trace")
+    trace_id = next(iter(trace_ids))
+    expected_model = str(manifest["model"]).split("/", 1)[-1]
+    trajectory_times: list[datetime] = []
+    ordered_run_ids: list[str] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    previous_run_id: str | None = None
+    closed_run_ids: set[str] = set()
+    for row in trajectory_rows:
+        run_id = str(row.get("runId", ""))
+        if not run_id:
+            raise V3ContractError("trajectory event lacks a gateway run id")
+        if run_id != previous_run_id:
+            if run_id in closed_run_ids:
+                raise V3ContractError("trajectory gateway runs are not contiguous")
+            if previous_run_id is not None:
+                closed_run_ids.add(previous_run_id)
+            ordered_run_ids.append(run_id)
+            grouped[run_id] = []
+            previous_run_id = run_id
+        grouped[run_id].append(row)
+        if (
+            row.get("traceId") != trace_id
+            or row.get("sessionId") != trace_id
+            or row.get("sessionKey") != expected_session_key
+            or row.get("provider") != "openai"
+            or row.get("modelId") != expected_model
+        ):
+            raise V3ContractError("trajectory identity differs from the selected frozen role session")
+        observed_at = _forensic_timestamp(row.get("ts"), "trajectory")
+        if observed_at >= journal_started:
+            raise V3ContractError("trajectory contains an event at or after the incomplete attempt started")
+        trajectory_times.append(observed_at)
+    if trajectory_times != sorted(trajectory_times):
+        raise V3ContractError("trajectory events are not timestamp ordered")
+
+    model_events: list[dict[str, Any]] = []
+    trajectory_usages: list[dict[str, int]] = []
+    for run_id in ordered_run_ids:
+        events = grouped[run_id]
+        if [row.get("type") for row in events] != [
+            "session.started", "context.compiled", "prompt.submitted",
+            "model.completed", "session.ended",
+        ]:
+            raise V3ContractError("trajectory contains a gateway run that is not exactly complete")
+        data = events[3].get("data")
+        end_data = events[4].get("data")
+        if not isinstance(data, dict) or any(data.get(key) not in (False, None) for key in (
+            "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
+        )):
+            raise V3ContractError("trajectory contains a prior provider response with terminal flags")
+        if (
+            not isinstance(end_data, dict)
+            or end_data.get("status") not in ("success", "completed")
+            or any(end_data.get(key) not in (False, None) for key in (
+                "timedOut", "aborted", "yieldDetected", "promptError", "terminalError"
+            ))
+        ):
+            raise V3ContractError("trajectory contains a prior gateway run without successful closure")
+        texts = data.get("assistantTexts")
+        if not isinstance(texts, list) or len(texts) != 1 or not isinstance(texts[0], str):
+            raise V3ContractError("trajectory prior call must contain exactly one assistant text")
+        model_events.append(events[3])
+        trajectory_usages.append(_provider_usage_from_trajectory(data, f"trajectory run {run_id}"))
+
+    session_rows = _read_jsonl(session_log_path)
+    if (
+        not session_rows
+        or session_rows[0].get("type") != "session"
+        or session_rows[0].get("id") != trace_id
+    ):
+        raise V3ContractError("session log does not identify the complete role trace")
+    messages = session_rows[1:]
+    if len(messages) != 2 * len(ordered_run_ids) or any(
+        row.get("type") != "message" for row in messages
+    ):
+        raise V3ContractError("session log is not one complete user/assistant pair per gateway run")
+    message_times = [
+        _forensic_timestamp(row.get("timestamp"), "session log") for row in messages
+    ]
+    if message_times != sorted(message_times):
+        raise V3ContractError("session messages are not timestamp ordered")
+    if any(observed_at >= journal_started for observed_at in message_times):
+        raise V3ContractError("session log contains a message at or after the incomplete attempt started")
+    message_ids: set[str] = set()
+    prior_message_id: str | None = None
+    for index, row in enumerate(messages):
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id or row_id in message_ids:
+            raise V3ContractError("session log contains a missing or duplicate message id")
+        message_ids.add(row_id)
+        if index > 0 and row.get("parentId") != prior_message_id:
+            raise V3ContractError("session message parent chain is incomplete")
+        prior_message_id = row_id
+
+    role_usage = [
+        row for row in usage
+        if row.get("role") == role and row.get("session_id") == trace_id
+    ]
+    if [row.get("gateway_run_id") for row in role_usage] != ordered_run_ids:
+        raise V3ContractError("trajectory gateway runs do not equal prior recorded role usage")
+    for index, (run_id, model_event, provider_usage, usage_row) in enumerate(zip(
+        ordered_run_ids, model_events, trajectory_usages, role_usage, strict=True
+    )):
+        user_row, assistant_row = messages[index * 2:index * 2 + 2]
+        user_message = user_row.get("message")
+        assistant_message = assistant_row.get("message")
+        if (
+            not isinstance(user_message, dict)
+            or user_message.get("role") != "user"
+            or not isinstance(assistant_message, dict)
+            or assistant_message.get("role") != "assistant"
+        ):
+            raise V3ContractError("session log does not alternate exact user and assistant messages")
+        prompt = _message_text(user_row)
+        context_data = grouped[run_id][1].get("data")
+        submitted_data = grouped[run_id][2].get("data")
+        context_prompt = context_data.get("prompt") if isinstance(context_data, dict) else None
+        submitted_prompt = submitted_data.get("prompt") if isinstance(submitted_data, dict) else None
+        if (
+            not isinstance(prompt, str)
+            or not _trajectory_prompt_matches(prompt, context_prompt)
+            or not _trajectory_prompt_matches(prompt, submitted_prompt)
+        ):
+            raise V3ContractError("session prompt does not match its trajectory call")
+        raw_text = model_event["data"]["assistantTexts"][0]
+        if (
+            _message_text(assistant_row) != raw_text
+            or assistant_message.get("provider") != "openai"
+            or assistant_message.get("model") != expected_model
+            or assistant_message.get("stopReason") != "stop"
+            or _session_usage(assistant_row, f"session response {run_id}") != provider_usage
+        ):
+            raise V3ContractError("session response does not match its completed trajectory call")
+        try:
+            content = parse_json_object(raw_text)
+        except ModelTransportError:
+            response_hash = stable_hash(raw_text)
+        else:
+            response_hash = stable_hash(content)
+        if (
+            usage_row.get("run_id") != manifest["run_id"]
+            or usage_row.get("arm") != arm
+            or usage_row.get("provider") != "openai"
+            or usage_row.get("model") != expected_model
+            or usage_row.get("usage") != provider_usage
+            or usage_row.get("response_hash") != response_hash
+        ):
+            raise V3ContractError("prior recorded usage does not match the complete session trace")
+
+    reconciled_at = utc_now()
+    if _forensic_timestamp(reconciled_at, "reconciliation") < journal_started:
+        raise V3ContractError("reconciliation timestamp predates the incomplete attempt")
+    ledger_path = Path(manifest["usage_ledger_path"]).resolve()
+    journal_terminal_row = {
+        "attempt_id": attempt_id,
+        "attempt_kind": "original",
+        "turn_index": flow["turn_index"],
+        "state_hash": started["state_hash"],
+        "role": role,
+        "event": "transport_failed",
+        "timestamp": reconciled_at,
+        "error": _UNDISPATCHED_REASON,
+        "evidence_source": "openclaw_undispatched_attempt_reconciliation",
+        "trajectory_sha256": trajectory_sha256,
+        "session_log_sha256": session_log_sha256,
+    }
+    flow_transition = {
+        "status": "failed_contract",
+        "updated_at": reconciled_at,
+        "contract_failure": {"phase": role, "message": _UNDISPATCHED_REASON},
+    }
+    pair_transition = {
+        "next_arm": other_arm,
+        "status": "failed_contract",
+        "last_arm": arm,
+        "last_result": {
+            "status": "failed_contract",
+            "reason": _UNDISPATCHED_REASON,
+            "run_dir": str(run_dir),
+            "provider_calls_added": 0,
+            "provider_usage_rows_added": 0,
+            "simulator_turns_added": 0,
+        },
+        "updated_at": reconciled_at,
+    }
+    target_journal = [*journal, journal_terminal_row]
+    final_flow = deepcopy(flow)
+    final_flow.update(deepcopy(flow_transition))
+    final_pair = deepcopy(pair)
+    final_pair.update(deepcopy(pair_transition))
+    source = {
+        "kind": "openclaw_no_dispatch_boundary",
+        "trajectory_path": str(trajectory_path),
+        "trajectory_sha256": trajectory_sha256,
+        "trajectory_rows": len(trajectory_rows),
+        "trajectory_last_timestamp": str(trajectory_rows[-1]["ts"]),
+        "trajectory_last_event_sha256": hashlib.sha256(
+            _canonical(trajectory_rows[-1]).encode()
+        ).hexdigest(),
+        "session_log_path": str(session_log_path),
+        "session_log_sha256": session_log_sha256,
+        "session_log_rows": len(session_rows),
+        "session_last_timestamp": str(messages[-1]["timestamp"]),
+        "session_last_message_sha256": hashlib.sha256(
+            _canonical(messages[-1]).encode()
+        ).hexdigest(),
+        "trace_id": trace_id,
+        "last_completed_gateway_run_id": ordered_run_ids[-1],
+        "journal_started_at": str(started["timestamp"]),
+        "trajectory_events_at_or_after_start": 0,
+        "session_messages_at_or_after_start": 0,
+    }
+    receipt = {
+        "schema_version": 1,
+        "status": "prepared_undispatched_attempt_reconciliation",
+        "reconciled_at": reconciled_at,
+        "pair_id": pair["pair_id"],
+        "run_id": manifest["run_id"],
+        "arm": arm,
+        "turn_index": flow["turn_index"],
+        "role": role,
+        "state_hash": started["state_hash"],
+        "attempt_id": attempt_id,
+        "attempt_kind": "original",
+        "source": source,
+        "provider_calls_added": 0,
+        "provider_usage_rows_added": 0,
+        "model_failures_added": 0,
+        "accepted_model_decisions_added": 0,
+        "role_invocations_added": 0,
+        "simulator_turns_added": 0,
+        "transaction": {
+            "transaction_id": stable_hash({
+                "pair_id": pair["pair_id"],
+                "run_id": manifest["run_id"],
+                "attempt_id": attempt_id,
+                "trajectory_sha256": trajectory_sha256,
+                "session_log_sha256": session_log_sha256,
+            }),
+            "ledger_path": str(ledger_path),
+            "source": {
+                "files": {"journal": _file_record(run_dir / "call-journal.jsonl")},
+                "ledger_prefix": _file_record(ledger_path),
+                "flow": _file_record(flow_path),
+                "flow_transition_fields": {
+                    key: deepcopy(flow[key])
+                    for key in ("status", "updated_at", "contract_failure")
+                    if key in flow
+                },
+                "pair": _file_record(pair_path),
+                "pair_transition_fields": {
+                    key: deepcopy(pair[key])
+                    for key in ("next_arm", "status", "last_arm", "last_result", "updated_at")
+                    if key in pair
+                },
+                "protected_artifacts": _undispatched_protected_artifacts(
+                    pair_dir, run_dir, other_run_dir
+                ),
+            },
+            "target": {
+                "files": {"journal": _jsonl_sha256(target_journal)},
+                "flow": _json_sha256(final_flow),
+                "pair": _json_sha256(final_pair),
+            },
+            "rows": {"journal": target_journal},
+            "flow_transition": flow_transition,
+            "pair_transition": pair_transition,
+        },
+    }
+    atomic_json(receipt_path, receipt)
+    return _finish_v3_undispatched_reconciliation(
         pair_dir, run_dir, other_run_dir, receipt_path, receipt
     )

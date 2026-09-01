@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +248,202 @@ def _verify_gateway_restart_transaction(
     }
     if observed_final != final:
         errors.append(f"{arm}: gateway-restart final transaction receipt mismatch")
+    return errors
+
+
+_UNDISPATCHED_REASON = (
+    "gateway restart left a write-ahead attempt with no OpenClaw dispatch observed; "
+    "terminalized without retry"
+)
+
+
+def _undispatched_protected_records(
+    pair_dir: Path, run_dir: Path, other_run_dir: Path
+) -> dict[str, dict[str, Any]]:
+    protected = _restart_protected_records(pair_dir, run_dir, other_run_dir)
+    protected.update({
+        "run/usage.jsonl": _file_record(run_dir / "usage.jsonl"),
+        "run/model-failures.jsonl": _file_record(run_dir / "model-failures.jsonl"),
+    })
+    return protected
+
+
+def _undispatched_ledger_prefix_matches(
+    path: Path, prefix: dict[str, Any], run_id: str
+) -> bool:
+    if not path.is_file():
+        return prefix.get("sha256") is None and prefix.get("bytes") == 0
+    raw = path.read_bytes()
+    try:
+        size = int(prefix.get("bytes", -1))
+    except (TypeError, ValueError):
+        return False
+    if size < 0 or len(raw) < size:
+        return False
+    original = raw[:size]
+    if prefix.get("sha256") is None:
+        if original:
+            return False
+    elif hashlib.sha256(original).hexdigest() != prefix.get("sha256"):
+        return False
+    suffix = raw[size:]
+    if suffix and original and not original.endswith(b"\n"):
+        return False
+    for line in suffix.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(row, dict) or row.get("run_id") == run_id:
+            return False
+    return True
+
+
+def _verify_undispatched_transaction(
+    run_dir: Path, manifest: dict[str, Any], receipt: dict[str, Any]
+) -> list[str]:
+    arm = str(manifest.get("arm"))
+    errors: list[str] = []
+    transaction = receipt.get("transaction")
+    final = receipt.get("final")
+    if not isinstance(transaction, dict) or not isinstance(final, dict):
+        return [f"{arm}: undispatched-attempt receipt lacks its completed transaction"]
+    pair_dir = Path(manifest["pair_dir"]).resolve()
+    pair_path = pair_dir / "pair.json"
+    pair = read_json(pair_path)
+    other_arm = "theatre" if arm == "control" else "control"
+    other_run_dir = Path(pair[f"{other_arm}_run"]).resolve()
+    source = transaction.get("source", {})
+    target = transaction.get("target", {})
+    rows = transaction.get("rows", {})
+    if set(rows) != {"journal"} or set(source.get("files", {})) != {"journal"}:
+        return [f"{arm}: undispatched-attempt transaction file set mismatch"]
+    if set(target.get("files", {})) != {"journal"}:
+        return [f"{arm}: undispatched-attempt transaction target set mismatch"]
+    expected_transaction_id = stable_hash({
+        "pair_id": receipt.get("pair_id"),
+        "run_id": receipt.get("run_id"),
+        "attempt_id": receipt.get("attempt_id"),
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    })
+    if transaction.get("transaction_id") != expected_transaction_id:
+        errors.append(f"{arm}: undispatched-attempt transaction id mismatch")
+
+    journal_rows = rows.get("journal")
+    source_record = source["files"]["journal"]
+    terminal = journal_rows[-1] if isinstance(journal_rows, list) and journal_rows else {}
+    expected_terminal = {
+        "attempt_id": receipt.get("attempt_id"),
+        "attempt_kind": "original",
+        "turn_index": receipt.get("turn_index"),
+        "state_hash": receipt.get("state_hash"),
+        "role": receipt.get("role"),
+        "event": "transport_failed",
+        "timestamp": receipt.get("reconciled_at"),
+        "error": _UNDISPATCHED_REASON,
+        "evidence_source": "openclaw_undispatched_attempt_reconciliation",
+        "trajectory_sha256": receipt.get("source", {}).get("trajectory_sha256"),
+        "session_log_sha256": receipt.get("source", {}).get("session_log_sha256"),
+    }
+    if terminal != expected_terminal:
+        errors.append(f"{arm}: undispatched-attempt terminal row exceeds the receipt")
+    current_journal = _file_record(run_dir / "call-journal.jsonl")
+    if (
+        not isinstance(journal_rows, list)
+        or _jsonl_sha256(journal_rows) != target["files"]["journal"]
+        or current_journal.get("sha256") != target["files"]["journal"]
+        or len(journal_rows) != int(source_record.get("rows", -1)) + 1
+    ):
+        errors.append(f"{arm}: undispatched-attempt journal transaction hash mismatch")
+    elif source_record.get("sha256") is None:
+        if journal_rows[:-1]:
+            errors.append(f"{arm}: undispatched-attempt journal source absence mismatch")
+    elif _jsonl_sha256(journal_rows[:-1]) != source_record.get("sha256"):
+        errors.append(f"{arm}: undispatched-attempt prior journal rows changed")
+
+    ledger_path = Path(transaction.get("ledger_path", "")).resolve()
+    expected_ledger = Path(manifest["usage_ledger_path"]).resolve()
+    ledger_prefix = source.get("ledger_prefix")
+    if ledger_path != expected_ledger:
+        errors.append(f"{arm}: undispatched-attempt transaction targets the wrong usage ledger")
+    elif not isinstance(ledger_prefix, dict) or not _undispatched_ledger_prefix_matches(
+        ledger_path, ledger_prefix, str(receipt.get("run_id"))
+    ):
+        errors.append(f"{arm}: undispatched-attempt no-usage ledger boundary mismatch")
+
+    flow = read_json(run_dir / "flow.json")
+    source_flow = dict(flow)
+    for key in ("status", "updated_at", "contract_failure"):
+        source_flow.pop(key, None)
+    source_flow.update(source.get("flow_transition_fields", {}))
+    source_pair = dict(pair)
+    for key in ("next_arm", "status", "last_arm", "last_result", "updated_at"):
+        source_pair.pop(key, None)
+    source_pair.update(source.get("pair_transition_fields", {}))
+
+    def json_sha(value: Any) -> str:
+        return hashlib.sha256(
+            (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+        ).hexdigest()
+
+    if json_sha(source_flow) != source.get("flow", {}).get("sha256"):
+        errors.append(f"{arm}: undispatched-attempt source flow cannot be reconstructed")
+    if json_sha(source_pair) != source.get("pair", {}).get("sha256"):
+        errors.append(f"{arm}: undispatched-attempt source pair cannot be reconstructed")
+    expected_flow_transition = {
+        "status": "failed_contract",
+        "updated_at": receipt.get("reconciled_at"),
+        "contract_failure": {
+            "phase": receipt.get("role"),
+            "message": _UNDISPATCHED_REASON,
+        },
+    }
+    expected_pair_transition = {
+        "next_arm": other_arm,
+        "status": "failed_contract",
+        "last_arm": arm,
+        "last_result": {
+            "status": "failed_contract",
+            "reason": _UNDISPATCHED_REASON,
+            "run_dir": str(run_dir),
+            "provider_calls_added": 0,
+            "provider_usage_rows_added": 0,
+            "simulator_turns_added": 0,
+        },
+        "updated_at": receipt.get("reconciled_at"),
+    }
+    if (
+        transaction.get("flow_transition") != expected_flow_transition
+        or transaction.get("pair_transition") != expected_pair_transition
+    ):
+        errors.append(f"{arm}: undispatched-attempt state transition mismatch")
+    expected_flow = dict(source_flow)
+    expected_flow.update(expected_flow_transition)
+    expected_pair = dict(source_pair)
+    expected_pair.update(expected_pair_transition)
+    if (
+        json_sha(expected_flow) != target.get("flow")
+        or json_sha(expected_pair) != target.get("pair")
+        or _file_record(run_dir / "flow.json").get("sha256") != target.get("flow")
+        or _file_record(pair_path).get("sha256") != target.get("pair")
+    ):
+        errors.append(f"{arm}: undispatched-attempt terminal state hash mismatch")
+
+    protected = _undispatched_protected_records(pair_dir, run_dir, other_run_dir)
+    if protected != source.get("protected_artifacts"):
+        errors.append(f"{arm}: undispatched-attempt reconciliation changed protected evidence")
+    observed_final = {
+        "files": {"journal": current_journal},
+        "flow": _file_record(run_dir / "flow.json"),
+        "pair": _file_record(pair_path),
+        "ledger_prefix": ledger_prefix,
+        "protected_artifacts": protected,
+    }
+    if observed_final != final:
+        errors.append(f"{arm}: undispatched-attempt final transaction receipt mismatch")
     return errors
 
 
@@ -583,6 +780,141 @@ def _verify_run(
                     if isinstance(source_path, str) and Path(source_path).is_file():
                         if hashlib.sha256(Path(source_path).read_bytes()).hexdigest() != source.get(hash_key):
                             errors.append(f"{expected_arm}: available gateway-restart source hash mismatch")
+
+        undispatched_receipt_path = run_dir / "undispatched-attempt-reconciliation.json"
+        undispatched_terminal_rows = [
+            row for row in call_journal
+            if row.get("evidence_source")
+            == "openclaw_undispatched_attempt_reconciliation"
+        ]
+        if undispatched_receipt_path.exists() or undispatched_terminal_rows:
+            if not undispatched_receipt_path.is_file() or len(undispatched_terminal_rows) != 1:
+                errors.append(
+                    f"{expected_arm}: undispatched-attempt evidence requires one receipt "
+                    "and one terminal journal row"
+                )
+            else:
+                receipt = read_json(undispatched_receipt_path)
+                terminal = undispatched_terminal_rows[0]
+                attempt_id = receipt.get("attempt_id")
+                matching_journal = journal_by_attempt.get(str(attempt_id), [])
+                source = receipt.get("source") if isinstance(receipt.get("source"), dict) else {}
+                zero_fields = (
+                    "provider_calls_added",
+                    "provider_usage_rows_added",
+                    "model_failures_added",
+                    "accepted_model_decisions_added",
+                    "role_invocations_added",
+                    "simulator_turns_added",
+                )
+                receipt_consistent = (
+                    receipt.get("schema_version") == 1
+                    and receipt.get("status") == "reconciled_failed_contract"
+                    and receipt.get("run_id") == run_id
+                    and receipt.get("arm") == expected_arm
+                    and receipt.get("attempt_kind") == "original"
+                    and receipt.get("role") == flow.get("phase")
+                    and receipt.get("turn_index") == flow.get("turn_index")
+                    and receipt.get("state_hash") == stable_hash(state)
+                    and flow.get("status") == "failed_contract"
+                    and flow.get("pending_invocation") is None
+                    and len(matching_journal) == 2
+                    and matching_journal[0].get("event") == "started"
+                    and matching_journal[0].get("timestamp") == source.get("journal_started_at")
+                    and matching_journal[0].get("attempt_kind") == "original"
+                    and matching_journal[-1] == terminal
+                    and terminal.get("event") == "transport_failed"
+                    and terminal.get("error") == _UNDISPATCHED_REASON
+                    and source.get("kind") == "openclaw_no_dispatch_boundary"
+                    and isinstance(source.get("trace_id"), str)
+                    and bool(source.get("trace_id"))
+                    and isinstance(source.get("last_completed_gateway_run_id"), str)
+                    and bool(source.get("last_completed_gateway_run_id"))
+                    and source.get("trajectory_events_at_or_after_start") == 0
+                    and source.get("session_messages_at_or_after_start") == 0
+                    and all(
+                        isinstance(source.get(key), str) and len(source[key]) == 64
+                        for key in (
+                            "trajectory_sha256",
+                            "session_log_sha256",
+                            "trajectory_last_event_sha256",
+                            "session_last_message_sha256",
+                        )
+                    )
+                    and all(receipt.get(key) == 0 for key in zero_fields)
+                )
+                if not receipt_consistent:
+                    errors.append(
+                        f"{expected_arm}: undispatched-attempt reconciliation receipt is inconsistent"
+                    )
+                else:
+                    errors.extend(_verify_undispatched_transaction(run_dir, manifest, receipt))
+
+                source_specs = (
+                    (
+                        "trajectory_path", "trajectory_sha256", "trajectory_rows",
+                        "trajectory_last_timestamp", "trajectory_last_event_sha256", "ts",
+                    ),
+                    (
+                        "session_log_path", "session_log_sha256", "session_log_rows",
+                        "session_last_timestamp", "session_last_message_sha256", "timestamp",
+                    ),
+                )
+                for path_key, hash_key, rows_key, time_key, last_hash_key, row_time_key in source_specs:
+                    source_path = source.get(path_key)
+                    if not isinstance(source_path, str) or not Path(source_path).is_file():
+                        continue
+                    path = Path(source_path)
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != source.get(hash_key):
+                        errors.append(
+                            f"{expected_arm}: available undispatched-attempt source hash mismatch"
+                        )
+                        continue
+                    source_errors: list[str] = []
+                    source_rows = _read_jsonl(path, source_errors)
+                    if source_errors:
+                        errors.extend(
+                            f"{expected_arm}: undispatched source {item}" for item in source_errors
+                        )
+                        continue
+                    if (
+                        not source_rows
+                        or len(source_rows) != source.get(rows_key)
+                        or source_rows[-1].get(row_time_key) != source.get(time_key)
+                        or hashlib.sha256(_canonical(source_rows[-1]).encode()).hexdigest()
+                        != source.get(last_hash_key)
+                    ):
+                        errors.append(
+                            f"{expected_arm}: undispatched-attempt source boundary mismatch"
+                        )
+                        continue
+                    try:
+                        started_at = datetime.fromisoformat(
+                            str(source.get("journal_started_at", "")).replace("Z", "+00:00")
+                        )
+                        observed_times = [
+                            datetime.fromisoformat(
+                                str(row.get(row_time_key, "")).replace("Z", "+00:00")
+                            )
+                            for row in (
+                                source_rows
+                                if path_key == "trajectory_path"
+                                else source_rows[1:]
+                            )
+                        ]
+                    except ValueError:
+                        errors.append(
+                            f"{expected_arm}: undispatched-attempt source timestamp is invalid"
+                        )
+                    else:
+                        if (
+                            started_at.utcoffset() is None
+                            or any(value.utcoffset() is None for value in observed_times)
+                            or any(value >= started_at for value in observed_times)
+                        ):
+                            errors.append(
+                                f"{expected_arm}: undispatched-attempt source crosses its journal boundary"
+                            )
 
     for index, decision in enumerate(decisions):
         content = decision.get("content")

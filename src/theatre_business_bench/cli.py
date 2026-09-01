@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from .campaign import build_v2_terminal_campaign, write_v2_campaign_bundle
-from .evidence import reconcile_openclaw_failures, reconcile_openclaw_v3_gateway_restart
+from .evidence import (
+    reconcile_openclaw_failures,
+    reconcile_openclaw_v3_gateway_restart,
+    reconcile_openclaw_v3_undispatched_attempt,
+)
 from .policies import heuristic_actions
 from .report import (
     ReportGateError,
@@ -230,6 +234,20 @@ def reconcile_v3_restart_cmd(args: argparse.Namespace) -> None:
     emit(receipt)
 
 
+def reconcile_v3_undispatched_cmd(args: argparse.Namespace) -> None:
+    try:
+        receipt = reconcile_openclaw_v3_undispatched_attempt(
+            Path(args.pair),
+            args.arm,
+            Path(args.trajectory),
+            Path(args.session_log),
+        )
+    except (V2ContractError, V3ContractError) as exc:
+        emit({"status": "reconciliation_failed", "error": str(exc)})
+        raise SystemExit(1) from exc
+    emit(receipt)
+
+
 def render_report_cmd(args: argparse.Namespace) -> None:
     try:
         report = build_executive_report(
@@ -406,6 +424,18 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_v3.add_argument("--interrupted-gateway-run-id", required=True)
     reconcile_v3.add_argument("--completed-gateway-run-id", required=True)
     reconcile_v3.set_defaults(func=reconcile_v3_restart_cmd)
+
+    reconcile_undispatched = sub.add_parser(
+        "reconcile-openclaw-v3-undispatched-attempt",
+        help="terminalize one v3 write-ahead attempt with no observed OpenClaw dispatch",
+    )
+    reconcile_undispatched.add_argument("--pair", required=True)
+    reconcile_undispatched.add_argument(
+        "--arm", choices=("control", "theatre"), required=True
+    )
+    reconcile_undispatched.add_argument("--trajectory", required=True)
+    reconcile_undispatched.add_argument("--session-log", required=True)
+    reconcile_undispatched.set_defaults(func=reconcile_v3_undispatched_cmd)
 
     pair_report = sub.add_parser(
         "render-report",

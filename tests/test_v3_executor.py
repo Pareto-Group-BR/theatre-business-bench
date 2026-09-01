@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from theatre_business_bench.cli import pair_batch
-from theatre_business_bench.evidence import reconcile_openclaw_v3_gateway_restart
+from theatre_business_bench.evidence import (
+    reconcile_openclaw_v3_gateway_restart,
+    reconcile_openclaw_v3_undispatched_attempt,
+)
 from theatre_business_bench.runner import _v3_repair_message, atomic_json, create_pair, read_json, step_pair
 from theatre_business_bench.transport import ModelResult, ModelTransportError, OpenClawCodexTransport
 from theatre_business_bench.v3 import V3ContractError, activate_v3_pair
@@ -582,6 +585,222 @@ class V3ExecutorTests(unittest.TestCase):
                         pair_dir, "theatre", trajectory, session_log, "interrupted", "completed"
                     )
             self.assertEqual(len((theatre / "call-journal.jsonl").read_text().splitlines()), 1)
+
+    def test_undispatched_attempt_reconciliation_is_terminal_and_auditable(self) -> None:
+        actor_message = ""
+        actor_result: ModelResult | None = None
+        actor_calls = 0
+
+        def interrupted_invoke(
+            _transport: OpenClawCodexTransport, session_key: str, message: str
+        ) -> ModelResult:
+            nonlocal actor_message, actor_result, actor_calls
+            role = session_key.rsplit("-", 1)[-1]
+            if role == "actor":
+                actor_calls += 1
+                if actor_calls == 2:
+                    raise KeyboardInterrupt("runner stopped before OpenClaw dispatch")
+            by_role = {
+                "critic": critic(), "consciousness": consciousness(),
+                "planner": planner(), "actor": actor(), "control": control(),
+            }
+            observed = result(session_key, by_role[role], actor_calls + 20)
+            if role == "actor":
+                actor_message = message
+                actor_result = observed
+            return observed
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = self._activated(root)
+            with patch.object(OpenClawCodexTransport, "invoke", new=interrupted_invoke):
+                with self.assertRaises(KeyboardInterrupt):
+                    for _ in range(10):
+                        step_pair(pair_dir)
+            self.assertEqual(actor_calls, 2)
+            self.assertIsNotNone(actor_result)
+            assert actor_result is not None
+
+            pair = read_json(pair_dir / "pair.json")
+            theatre = Path(pair["theatre_run"])
+            attempt_id = json.loads(
+                (theatre / "call-journal.jsonl").read_text().splitlines()[-1]
+            )["attempt_id"]
+            trace_id = actor_result.session_id
+            session_key = trace_id
+            raw_text = actor_result.text
+            common = {
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "traceId": trace_id, "sessionId": trace_id,
+                "sessionKey": session_key, "provider": "openai",
+                "modelId": "gpt-5.6-sol", "runId": actor_result.run_id,
+            }
+            trajectory_rows = [
+                {**common, "type": "session.started", "ts": "2026-01-01T00:00:00Z"},
+                {**common, "type": "context.compiled", "ts": "2026-01-01T00:00:01Z",
+                 "data": {"prompt": actor_message}},
+                {**common, "type": "prompt.submitted", "ts": "2026-01-01T00:00:02Z",
+                 "data": {"prompt": actor_message}},
+                {**common, "type": "model.completed", "ts": "2026-01-01T00:00:03Z", "data": {
+                    "timedOut": False, "aborted": False, "yieldDetected": False,
+                    "promptError": None, "terminalError": None,
+                    "assistantTexts": [raw_text],
+                    "usage": {"input": 10, "cacheRead": 2, "cacheWrite": 0,
+                              "output": 5, "total": 17},
+                }},
+                {**common, "type": "session.ended", "ts": "2026-01-01T00:00:04Z",
+                 "data": {"status": "success"}},
+            ]
+            trajectory = root / "actor.trajectory.jsonl"
+            trajectory.write_text(
+                "".join(json.dumps(row) + "\n" for row in trajectory_rows),
+                encoding="utf-8",
+            )
+            session_rows = [
+                {"type": "session", "id": trace_id},
+                {"type": "message", "id": "user-1", "parentId": None,
+                 "timestamp": "2026-01-01T00:00:01Z",
+                 "message": {"role": "user", "content": actor_message}},
+                {"type": "message", "id": "assistant-1", "parentId": "user-1",
+                 "timestamp": "2026-01-01T00:00:03Z", "message": {
+                     "role": "assistant", "content": raw_text, "provider": "openai",
+                     "model": "gpt-5.6-sol", "stopReason": "stop",
+                     "usage": {"input": 10, "cacheRead": 2, "cacheWrite": 0,
+                               "output": 5, "totalTokens": 17},
+                 }},
+            ]
+            session_log = root / "actor.jsonl"
+            session_log.write_text(
+                "".join(json.dumps(row) + "\n" for row in session_rows),
+                encoding="utf-8",
+            )
+
+            with self._official_lock(root):
+                trajectory_rows[-1]["ts"] = "2099-01-01T00:00:00Z"
+                trajectory.write_text(
+                    "".join(json.dumps(row) + "\n" for row in trajectory_rows),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(V3ContractError, "at or after"):
+                    reconcile_openclaw_v3_undispatched_attempt(
+                        pair_dir, "theatre", trajectory, session_log
+                    )
+                trajectory_rows[-1]["ts"] = "2026-01-01T00:00:04Z"
+                trajectory.write_text(
+                    "".join(json.dumps(row) + "\n" for row in trajectory_rows),
+                    encoding="utf-8",
+                )
+
+                session_rows[-1]["timestamp"] = "2099-01-01T00:00:00Z"
+                session_log.write_text(
+                    "".join(json.dumps(row) + "\n" for row in session_rows),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(V3ContractError, "at or after"):
+                    reconcile_openclaw_v3_undispatched_attempt(
+                        pair_dir, "theatre", trajectory, session_log
+                    )
+                session_rows[-1]["timestamp"] = "2026-01-01T00:00:03Z"
+                session_log.write_text(
+                    "".join(json.dumps(row) + "\n" for row in session_rows),
+                    encoding="utf-8",
+                )
+
+            ledger_path = Path(read_json(theatre / "manifest.json")["usage_ledger_path"])
+            ledger_before = ledger_path.read_bytes()
+            from theatre_business_bench import evidence
+
+            original_atomic_json = evidence.atomic_json
+            interrupted_once = False
+
+            def interrupt_before_pair_commit(path: Path, value: dict) -> None:
+                nonlocal interrupted_once
+                if Path(path) == pair_dir / "pair.json" and not interrupted_once:
+                    interrupted_once = True
+                    raise OSError("simulated restart during undispatched reconciliation")
+                original_atomic_json(path, value)
+
+            with self._official_lock(root):
+                with (
+                    patch.object(evidence, "atomic_json", new=interrupt_before_pair_commit),
+                    self.assertRaises(OSError),
+                ):
+                    reconcile_openclaw_v3_undispatched_attempt(
+                        pair_dir, "theatre", trajectory, session_log
+                    )
+                prepared = read_json(
+                    theatre / "undispatched-attempt-reconciliation.json"
+                )
+                self.assertEqual(
+                    prepared["status"],
+                    "prepared_undispatched_attempt_reconciliation",
+                )
+                first = reconcile_openclaw_v3_undispatched_attempt(
+                    pair_dir, "theatre", trajectory, session_log
+                )
+                committed_paths = [
+                    theatre / "call-journal.jsonl",
+                    theatre / "flow.json",
+                    theatre / "usage.jsonl",
+                    theatre / "model-failures.jsonl",
+                    theatre / "undispatched-attempt-reconciliation.json",
+                    pair_dir / "pair.json",
+                    ledger_path,
+                ]
+                committed_bytes = {
+                    str(path): path.read_bytes() if path.exists() else None
+                    for path in committed_paths
+                }
+                second = reconcile_openclaw_v3_undispatched_attempt(
+                    pair_dir, "theatre", trajectory, session_log
+                )
+                self.assertEqual(
+                    committed_bytes,
+                    {
+                        str(path): path.read_bytes() if path.exists() else None
+                        for path in committed_paths
+                    },
+                )
+            self.assertEqual(first, second)
+            self.assertEqual(first["status"], "reconciled_failed_contract")
+            self.assertEqual(first["attempt_id"], attempt_id)
+            self.assertEqual(first["provider_calls_added"], 0)
+            self.assertEqual(ledger_path.read_bytes(), ledger_before)
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+            self.assertEqual(read_json(pair_dir / "pair.json")["status"], "failed_contract")
+
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"run_id": "later-official-run"}) + "\n")
+            self.assertEqual(verify_pair(pair_dir)["status"], "passed")
+
+            allowed_append = ledger_path.read_bytes()
+            with ledger_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"run_id": first["run_id"]}) + "\n")
+            same_run_append = verify_pair(pair_dir)
+            self.assertEqual(same_run_append["status"], "failed")
+            self.assertTrue(
+                any("no-usage ledger boundary" in item for item in same_run_append["errors"])
+            )
+            ledger_path.write_bytes(allowed_append)
+
+            receipt_path = theatre / "undispatched-attempt-reconciliation.json"
+            receipt = read_json(receipt_path)
+            receipt["provider_calls_added"] = 1
+            atomic_json(receipt_path, receipt)
+            tampered = verify_pair(pair_dir)
+            self.assertEqual(tampered["status"], "failed")
+            self.assertTrue(any("undispatched-attempt" in item for item in tampered["errors"]))
+
+    def test_undispatched_attempt_reconciliation_requires_canonical_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(V3ContractError, "canonical global-lock wrapper"):
+                    reconcile_openclaw_v3_undispatched_attempt(
+                        root / "pair", "theatre", root / "trajectory.jsonl",
+                        root / "session.jsonl",
+                    )
 
     def test_official_pair_batch_requires_canonical_lock_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
