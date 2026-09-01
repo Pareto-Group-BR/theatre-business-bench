@@ -106,7 +106,10 @@ only the exact source or exact planned target hash, so a restart of the
 reconciler resumes without duplicate usage or partial evidence. Final
 verification reconstructs the source rows and state and proves that simulator,
 accepted decisions, the other arm, activation, and pre-registration were not
-changed.
+changed. Because the provider ledger is shared by the whole campaign, the
+receipt freezes and verifies its exact transaction prefix while allowing only
+later append-only rows from subsequent official calls; changing any byte in the
+frozen prefix still fails closed.
 
 ## Subscription transport
 
