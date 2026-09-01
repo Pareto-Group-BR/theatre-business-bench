@@ -190,6 +190,31 @@ completed continuation, records the interrupted id, adds zero accepted model
 decisions and zero simulator turns, and leaves the seed `failed_contract` for
 campaign reliability analysis. It never authorizes retrying that repair.
 
+A narrower restart can stop the runner after the write-ahead `started` row but
+before OpenClaw records even `session.started`. In that case there are no
+returned bytes or provider usage to import. The separate no-dispatch transition
+accepts only a final **original** v3 attempt with no pending repair. It requires
+the complete trajectory and session log for that frozen role session, confronts
+every prior completed gateway run with its exact prompt, response, usage, and
+already-recorded benchmark usage, and requires every source event and message
+to predate the dangling journal row:
+
+```bash
+THEATRE_PAIR_DIR=/absolute/run-root/pairs/<pair-id> \
+THEATRE_ARM=theatre \
+THEATRE_TRAJECTORY=/absolute/openclaw/session.trajectory.jsonl \
+THEATRE_SESSION_LOG=/absolute/openclaw/session.jsonl \
+  ./scripts/reconcile-v3-undispatched-attempt.sh
+```
+
+The wrapper uses the same global lock and a crash-safe, byte-idempotent prepared
+transaction. It appends only a forensic `transport_failed` journal terminator,
+adds zero provider calls, zero usage, zero model evidence, zero role invocations,
+and zero simulator turns, then leaves the pair `failed_contract`. The receipt
+freezes both source hashes and the exact last-observed boundary; later global
+ledger rows for other seeds remain valid, while any later row for the terminal
+run fails verification. This path also never authorizes retry.
+
 The frozen design gave the single-agent control and Theatre the same four
 functional responsibilities, frozen evidence, and visible 14-action contract;
 only cognitive organization differed. Theatre routed Crítico → optional
