@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from theatre_business_bench.cli import pair_batch
-from theatre_business_bench.runner import atomic_json, create_pair, read_json, step_pair
+from theatre_business_bench.evidence import reconcile_openclaw_v3_gateway_restart
+from theatre_business_bench.runner import _v3_repair_message, atomic_json, create_pair, read_json, step_pair
 from theatre_business_bench.transport import ModelResult, ModelTransportError, OpenClawCodexTransport
 from theatre_business_bench.v3 import V3ContractError, activate_v3_pair
 from theatre_business_bench.verify import verify_pair
@@ -303,6 +304,147 @@ class V3ExecutorTests(unittest.TestCase):
             report = verify_pair(pair_dir)
             self.assertEqual(report["status"], "failed")
             self.assertTrue(any("incomplete or reordered" in item for item in report["errors"]))
+
+    def test_gateway_restart_reconciliation_charges_continuation_and_stops_terminal(self) -> None:
+        repair_messages: list[str] = []
+
+        def interrupted_invoke(
+            _transport: OpenClawCodexTransport, session_key: str, message: str
+        ) -> ModelResult:
+            role = session_key.rsplit("-", 1)[-1]
+            is_repair = "CURRENT V3 REPAIR INPUT" in message
+            if role == "actor" and is_repair:
+                repair_messages.append(message)
+                raise KeyboardInterrupt("gateway restart")
+            by_role = {
+                "critic": critic(), "consciousness": consciousness(),
+                "planner": planner(), "actor": actor(valid=False), "control": control(),
+            }
+            return result(session_key, by_role[role], 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = self._activated(root)
+            with patch.object(OpenClawCodexTransport, "invoke", new=interrupted_invoke):
+                with self.assertRaises(KeyboardInterrupt):
+                    for _ in range(10):
+                        step_pair(pair_dir)
+            self.assertEqual(len(repair_messages), 1)
+            pair = read_json(pair_dir / "pair.json")
+            theatre = Path(pair["theatre_run"])
+            flow = read_json(theatre / "flow.json")
+            pending = flow["pending_invocation"]
+            pending["original_message"] += "\n" + ("long-context-evidence " * 700)
+            atomic_json(theatre / "flow.json", flow)
+            repair_messages[0] = _v3_repair_message(
+                theatre,
+                pending["role"],
+                pending["original"],
+                pending["original_validation_errors"],
+                pending["original_message"],
+            )
+            session_key = f"agent:business-bench:bench-{theatre.name.lower()}-actor"
+            trace_id = "trace-restart-1"
+            interrupted_id = "gateway-interrupted"
+            completed_id = "gateway-auto-continuation"
+            self.assertGreater(len(repair_messages[0]), 20_000)
+            truncated_repair = repair_messages[0][:20_000] + "…"
+            replacement = actor(valid=True)
+            raw_text = json.dumps(replacement)
+            common = {
+                "traceSchema": "openclaw-trajectory", "schemaVersion": 1,
+                "traceId": trace_id, "sessionId": trace_id,
+                "sessionKey": session_key, "provider": "openai", "modelId": "gpt-5.6-sol",
+            }
+            trajectory_rows = [
+                {**common, "type": "session.started", "runId": interrupted_id, "ts": "2099-09-01T00:00:00Z"},
+                {**common, "type": "context.compiled", "runId": interrupted_id, "ts": "2099-09-01T00:00:01Z", "data": {"prompt": repair_messages[0]}},
+                {**common, "type": "prompt.submitted", "runId": interrupted_id, "ts": "2099-09-01T00:00:02Z", "data": {"prompt": truncated_repair}},
+                {**common, "type": "session.started", "runId": completed_id, "ts": "2099-09-01T00:01:00Z"},
+                {**common, "type": "context.compiled", "runId": completed_id, "ts": "2099-09-01T00:01:01Z", "data": {"prompt": "restart continuation"}},
+                {**common, "type": "prompt.submitted", "runId": completed_id, "ts": "2099-09-01T00:01:02Z", "data": {"prompt": "restart continuation"}},
+                {**common, "type": "model.completed", "runId": completed_id, "ts": "2099-09-01T00:02:00Z", "data": {
+                    "timedOut": False, "aborted": False, "promptError": None,
+                    "assistantTexts": [raw_text],
+                    "usage": {"input": 20, "cacheRead": 2, "cacheWrite": 0, "output": 5, "total": 27},
+                }},
+                {**common, "type": "session.ended", "runId": completed_id, "ts": "2099-09-01T00:02:01Z", "data": {"status": "completed"}},
+            ]
+            trajectory = root / "source.trajectory.jsonl"
+            trajectory.write_text(
+                "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
+            )
+            session_rows = [
+                {"type": "session", "id": trace_id},
+                {"type": "message", "message": {"role": "user", "content": repair_messages[0]}},
+                {"type": "message", "message": {"role": "user", "content": "[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting."}},
+                {"type": "message", "message": {"role": "assistant", "content": raw_text}},
+            ]
+            session_log = root / "source.session.jsonl"
+            session_log.write_text(
+                "".join(json.dumps(row) + "\n" for row in session_rows), encoding="utf-8"
+            )
+
+            first = reconcile_openclaw_v3_gateway_restart(
+                pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
+            )
+            second = reconcile_openclaw_v3_gateway_restart(
+                pair_dir, "theatre", trajectory, session_log, interrupted_id, completed_id
+            )
+            self.assertEqual(first, second)
+            self.assertEqual(first["status"], "reconciled_failed_contract")
+            self.assertEqual(first["provider_usage"]["total"], 27)
+            self.assertEqual(read_json(pair_dir / "pair.json")["status"], "failed_contract")
+            self.assertEqual(read_json(theatre / "flow.json")["status"], "failed_contract")
+            self.assertFalse((theatre / "turns.jsonl").exists())
+            failures = [json.loads(line) for line in (theatre / "model-failures.jsonl").read_text().splitlines()]
+            self.assertEqual(failures[-1]["failure_kind"], "gateway_restart_recovery")
+            self.assertEqual(failures[-1]["original_response_hash"], pending["original_response_hash"])
+            report = verify_pair(pair_dir)
+            self.assertEqual(report["status"], "passed", report["errors"])
+            self.assertEqual(report["runs"]["theatre"]["first_pass_contract_failures"], 1)
+            self.assertEqual(report["runs"]["theatre"]["terminal_repair_failures"], 1)
+            receipt_path = theatre / "gateway-restart-reconciliation.json"
+            receipt = read_json(receipt_path)
+            receipt["provider_usage"]["total"] += 1
+            atomic_json(receipt_path, receipt)
+            tampered = verify_pair(pair_dir)
+            self.assertEqual(tampered["status"], "failed")
+            self.assertIn(
+                "theatre: gateway-restart reconciliation receipt is inconsistent",
+                tampered["errors"],
+            )
+
+    def test_gateway_restart_reconciliation_refuses_session_without_exact_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pair_dir = self._activated(root)
+            pair = read_json(pair_dir / "pair.json")
+            theatre = Path(pair["theatre_run"])
+            flow = read_json(theatre / "flow.json")
+            flow["pending_invocation"] = {
+                "role": "actor", "turn_index": 0, "state_hash": "a" * 64,
+                "original": actor(valid=False), "original_response_hash": "b" * 64,
+                "original_validation_errors": ["actor error"], "original_message": "original",
+            }
+            flow["phase"] = "actor"
+            flow["current_step"] = "model_roles"
+            flow["provider_attempt_serial"] = 1
+            atomic_json(theatre / "flow.json", flow)
+            (theatre / "call-journal.jsonl").write_text(json.dumps({
+                "event": "started", "attempt_id": f"{theatre.name}:0:actor:repair:1",
+                "attempt_kind": "repair", "turn_index": 0, "state_hash": "a" * 64,
+                "original_response_hash": "b" * 64, "role": "actor",
+            }) + "\n", encoding="utf-8")
+            trajectory = root / "trace.jsonl"
+            session_log = root / "session.jsonl"
+            trajectory.write_text("", encoding="utf-8")
+            session_log.write_text("", encoding="utf-8")
+            with self.assertRaises(V3ContractError):
+                reconcile_openclaw_v3_gateway_restart(
+                    pair_dir, "theatre", trajectory, session_log, "interrupted", "completed"
+                )
+            self.assertEqual(len((theatre / "call-journal.jsonl").read_text().splitlines()), 1)
 
     def test_official_pair_batch_requires_canonical_lock_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

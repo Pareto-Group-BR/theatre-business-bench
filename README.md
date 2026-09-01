@@ -128,11 +128,12 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v3-preregistration
 python3 -m unittest tests.test_v3 tests.test_v3_executor -v
 ```
 
-State: `EXECUTOR_READY_FOR_REVIEW / NO_INFERENCE`. Pair creation freezes the
-exact v3 bytes and remains offline. Activation is a separate audited transition
-that accepts only an untouched pair from seeds 2301–2305 and the exact clean
-commit published at `origin/main`. No official seed has been created or
-activated by this implementation change.
+State: `EXECUTOR_PUBLISHED / OFFICIAL_CAMPAIGN_RUNNING / NO_AGGREGATE`. Pair
+creation freezes the exact v3 bytes and remains offline. Activation is a
+separate audited transition that accepts only an untouched pair from seeds
+2301–2305 and the exact clean commit published at `origin/main`. Seed 2301 was
+created and activated from the published executor; partial checkpoints are not
+results or winners.
 See [`docs/EXPERIMENT_PROTOCOL_V3.md`](docs/EXPERIMENT_PROTOCOL_V3.md) and
 [`preregistration/v3.json`](preregistration/v3.json).
 
@@ -160,6 +161,28 @@ preserves the original response and permits one paid symmetric structural
 repair with the same role, turn, state, and original-response identity. A
 second failure, parse failure, transport failure, model drift, incomplete call
 journal, or replay divergence stops loud before any simulator transition.
+
+A gateway restart may kill the runner after the write-ahead `started` row while
+OpenClaw later auto-continues the same role session under a second gateway run
+id. That is not silently accepted as the frozen repair. The forensic command
+below requires the exact trajectory **and** full session log, binds the original
+repair prompt, the explicit restart message, the returned bytes and provider
+usage, then terminally preserves the pair without applying a business action:
+
+```bash
+PYTHONPATH=src python3 -m theatre_business_bench.cli \
+  reconcile-openclaw-v3-gateway-restart \
+  --pair /absolute/run-root/pairs/<pair-id> --arm control \
+  --trajectory /absolute/openclaw/session.trajectory.jsonl \
+  --session-log /absolute/openclaw/session.jsonl \
+  --interrupted-gateway-run-id <started-without-completion> \
+  --completed-gateway-run-id <auto-continuation-completion>
+```
+
+The command is idempotent for the same source bytes and ids. It charges the
+completed continuation, records the interrupted id, adds zero accepted model
+decisions and zero simulator turns, and leaves the seed `failed_contract` for
+campaign reliability analysis. It never authorizes retrying that repair.
 
 The frozen design gave the single-agent control and Theatre the same four
 functional responsibilities, frozen evidence, and visible 14-action contract;

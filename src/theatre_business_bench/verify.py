@@ -298,6 +298,69 @@ def _verify_run(
         ):
             errors.append(f"{expected_arm}: v3 usage attempts differ from completed call journal")
 
+        restart_receipt_path = run_dir / "gateway-restart-reconciliation.json"
+        restart_failures = [
+            row for row in failures
+            if row.get("evidence_source") == "openclaw_gateway_restart_reconciliation"
+        ]
+        if restart_receipt_path.exists() or restart_failures:
+            if not restart_receipt_path.is_file() or len(restart_failures) != 1:
+                errors.append(f"{expected_arm}: gateway-restart evidence requires one receipt and one failure row")
+            else:
+                receipt = read_json(restart_receipt_path)
+                failure = restart_failures[0]
+                attempt_id = receipt.get("attempt_id")
+                matching_usage = [row for row in usage if row.get("attempt_id") == attempt_id]
+                matching_journal = journal_by_attempt.get(str(attempt_id), [])
+                source = receipt.get("source") if isinstance(receipt.get("source"), dict) else {}
+                pending = flow.get("pending_invocation")
+                receipt_consistent = (
+                    receipt.get("schema_version") == 1
+                    and receipt.get("status") == "reconciled_failed_contract"
+                    and receipt.get("run_id") == run_id
+                    and receipt.get("arm") == expected_arm
+                    and receipt.get("role") == failure.get("role")
+                    and receipt.get("turn_index") == failure.get("turn_index")
+                    and receipt.get("response_hash") == failure.get("response_hash")
+                    and receipt.get("completed_gateway_run_id") == failure.get("gateway_run_id")
+                    and receipt.get("interrupted_gateway_run_id") == failure.get("interrupted_gateway_run_id")
+                    and receipt.get("provider_usage") == (matching_usage[0].get("usage") if len(matching_usage) == 1 else None)
+                    and failure.get("failure_kind") == "gateway_restart_recovery"
+                    and failure.get("attempt_kind") == "repair"
+                    and flow.get("status") == "failed_contract"
+                    and isinstance(pending, dict)
+                    and pending.get("role") == receipt.get("role")
+                    and pending.get("turn_index") == receipt.get("turn_index")
+                    and pending.get("state_hash") == failure.get("state_hash")
+                    and pending.get("original_response_hash") == failure.get("original_response_hash")
+                    and len(matching_journal) == 2
+                    and matching_journal[-1].get("outcome") == "gateway_restart_recovery_terminal"
+                    and matching_journal[-1].get("gateway_run_id") == receipt.get("completed_gateway_run_id")
+                    and matching_journal[-1].get("interrupted_gateway_run_id") == receipt.get("interrupted_gateway_run_id")
+                    and source.get("kind") == "openclaw_gateway_restart_chain"
+                    and isinstance(source.get("trace_id"), str)
+                    and bool(source.get("trace_id"))
+                    and source.get("trace_id") == failure.get("session_id")
+                    and source.get("completed_event_sha256") == failure.get("trajectory_event_sha256")
+                    and all(isinstance(source.get(key), str) and len(source[key]) == 64 for key in (
+                        "trajectory_sha256", "session_log_sha256", "completed_event_sha256",
+                        "repair_message_sha256", "restart_message_sha256", "response_message_sha256",
+                    ))
+                    and receipt.get("simulator_turns_added") == 0
+                    and receipt.get("accepted_model_decisions_added") == 0
+                    and receipt.get("provider_usage_rows_added") == 1
+                )
+                if not receipt_consistent:
+                    errors.append(f"{expected_arm}: gateway-restart reconciliation receipt is inconsistent")
+                for path_key, hash_key in (
+                    ("trajectory_path", "trajectory_sha256"),
+                    ("session_log_path", "session_log_sha256"),
+                ):
+                    source_path = source.get(path_key)
+                    if isinstance(source_path, str) and Path(source_path).is_file():
+                        if hashlib.sha256(Path(source_path).read_bytes()).hexdigest() != source.get(hash_key):
+                            errors.append(f"{expected_arm}: available gateway-restart source hash mismatch")
+
     for index, decision in enumerate(decisions):
         content = decision.get("content")
         if stable_hash(content) != decision.get("response_hash"):
@@ -334,6 +397,19 @@ def _verify_run(
                 )
             ):
                 errors.append(f"{expected_arm}: model failure {index} has invalid drift evidence")
+        elif failure.get("failure_kind") == "gateway_restart_recovery":
+            try:
+                recovered_content = parse_json_object(raw_text)
+            except ModelTransportError as exc:
+                recovered_identity = stable_hash(raw_text)
+                if failure.get("parse_error") != str(exc):
+                    errors.append(f"{expected_arm}: model failure {index} parse error mismatch")
+            else:
+                recovered_identity = stable_hash(recovered_content)
+                if failure.get("parse_error") is not None:
+                    errors.append(f"{expected_arm}: model failure {index} has a spurious parse error")
+            if recovered_identity != failure.get("response_hash"):
+                errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
         else:
             if stable_hash(raw_text) != failure.get("response_hash"):
                 errors.append(f"{expected_arm}: model failure {index} response hash mismatch")
@@ -587,7 +663,11 @@ def _verify_run(
     cadence_source = [*decisions, *failures]
     if protocol == "v3":
         cadence_source = [*invocations, *failures]
-        if isinstance(flow.get("pending_invocation"), dict):
+        has_terminal_restart_recovery = any(
+            item.get("evidence_source") == "openclaw_gateway_restart_reconciliation"
+            for item in failures
+        )
+        if isinstance(flow.get("pending_invocation"), dict) and not has_terminal_restart_recovery:
             cadence_source.append({
                 "timestamp": flow.get("updated_at", ""),
                 "turn_index": flow["pending_invocation"].get("turn_index"),
@@ -726,12 +806,16 @@ def _verify_run(
         "model_failures": len(failures),
         "first_pass_contract_failures": sum(
             1 for row in invocations if row.get("original_validation_errors")
+        ) + sum(
+            1 for row in failures if row.get("failure_kind") == "gateway_restart_recovery"
         ) if protocol == "v3" else 0,
         "successful_repairs": sum(
             1 for row in invocations if row.get("outcome") == "accepted_repair"
         ) if protocol == "v3" else 0,
         "terminal_repair_failures": sum(
             1 for row in invocations if row.get("outcome") == "failed_contract_after_repair"
+        ) + sum(
+            1 for row in failures if row.get("failure_kind") == "gateway_restart_recovery"
         ) if protocol == "v3" else 0,
         "repair_calls": len(repair_rows) if protocol == "v3" else 0,
         "repair_tokens": sum(
