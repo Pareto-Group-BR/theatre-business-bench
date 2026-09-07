@@ -1,0 +1,299 @@
+{
+  "campaign": {
+    "completed_pairs": 0,
+    "expected_pairs": 5,
+    "failed_contract_pairs": 5,
+    "pairs_with_economic_result": 0,
+    "protocol": "v3",
+    "status": "terminal",
+    "verified_pairs": 5
+  },
+  "caveats": [
+    "Falhas terminais são evidência de confiabilidade do tratamento e nunca recebem o score parcial do ponto onde pararam.",
+    "Dias, chamadas e tokens de pares falhos não são comparados como se os horizontes fossem iguais.",
+    "Reparos mostram robustez contratual e custo; não substituem o resultado econômico anual.",
+    "O benchmark econômico complementa, mas não substitui, o júri humano cego do épico Theatre."
+  ],
+  "claim": "campanha oficial terminal; efeito econômico não identificável",
+  "economic_outcome": {
+    "bootstrap_interval_95": null,
+    "bootstrap_method": null,
+    "control_seed_wins": null,
+    "estimand_status": "not_observed",
+    "mean_paired_difference": null,
+    "median_paired_difference": null,
+    "paired_differences": null,
+    "reason": "nenhuma seed produziu result.json; placares parciais não são resultados",
+    "theatre_seed_wins": null,
+    "ties": null,
+    "winner": null
+  },
+  "integrity": {
+    "evidence_file_count": 201,
+    "evidence_manifest_sha256": "e6c34c46273ed6166de95ad497e5df7a769b3725e57d0571c39c91d7f1df7d72",
+    "preregistration_digest": "f232d69991b0cad74d4eb3012410a736d38bc60c2b063a03aafa4d5d31108f69",
+    "report_digest": "bf4947b49d97522bfb49a9f8e84ee96bfd91f28aeafd53e825578d719538ec69",
+    "status": "passed"
+  },
+  "next_boundary": {
+    "economic_claim": "not available from this campaign",
+    "official_v3_evidence": "immutable",
+    "resume_or_recreate_seeds_2301_2305": "forbidden"
+  },
+  "pairs": [
+    {
+      "arms": {
+        "control": {
+          "day": 72,
+          "first_pass_contract_failures": 1,
+          "flow_status": "failed_contract",
+          "model_calls": 26,
+          "model_failures": 1,
+          "output_tokens": 111430,
+          "provider_total_tokens": 3113028,
+          "repair_calls": 1,
+          "repair_tokens": 206847,
+          "replay_state_hash": "a519ddf7f8b605ed6e12f2a1dcbaa9a0c340c5978b9551dcf4f38656f8580141",
+          "run_id": "20260831T224218Z-control-s2301",
+          "successful_repairs": 0,
+          "terminal_repair_failures": 1,
+          "turns": 24
+        },
+        "theatre": {
+          "day": 72,
+          "first_pass_contract_failures": 1,
+          "flow_status": "ready",
+          "model_calls": 42,
+          "model_failures": 0,
+          "output_tokens": 36106,
+          "provider_total_tokens": 2579531,
+          "repair_calls": 1,
+          "repair_tokens": 83629,
+          "replay_state_hash": "643348b8bac78f0d863d9de8a3079f7a6f9582867e6bb8992e92eab8443deb76",
+          "run_id": "20260831T224218Z-theatre-s2301",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 24
+        }
+      },
+      "economic_result": null,
+      "failing_arm": "control",
+      "failure_message": "gateway restarted during the frozen repair; auto-continuation preserved and charged but not applied",
+      "failure_phase": "control",
+      "pair_id": "20260831T224218Z-pair-s2301",
+      "seed": 2301,
+      "status": "failed_contract",
+      "verification_digest": "4ce26704b4d743d52432a90df33d04288f9d6181373f5fe1a531525163518752"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 96,
+          "first_pass_contract_failures": 0,
+          "flow_status": "ready",
+          "model_calls": 32,
+          "model_failures": 0,
+          "output_tokens": 146399,
+          "provider_total_tokens": 3346868,
+          "repair_calls": 0,
+          "repair_tokens": 0,
+          "replay_state_hash": "c50cd48869e66c62e99d33d9c2466ffe93af312da5e14b194539d5c7009ed03e",
+          "run_id": "20260901T021125Z-control-s2302",
+          "successful_repairs": 0,
+          "terminal_repair_failures": 0,
+          "turns": 32
+        },
+        "theatre": {
+          "day": 93,
+          "first_pass_contract_failures": 1,
+          "flow_status": "failed_contract",
+          "model_calls": 54,
+          "model_failures": 0,
+          "output_tokens": 55835,
+          "provider_total_tokens": 3396969,
+          "repair_calls": 1,
+          "repair_tokens": 31618,
+          "replay_state_hash": "13f3f06d036360a485955b2fcef6a25b1936fe394392e67d82cc96251db7ff28",
+          "run_id": "20260901T021125Z-theatre-s2302",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 31
+        }
+      },
+      "economic_result": null,
+      "failing_arm": "theatre",
+      "failure_message": "gateway restart left a write-ahead attempt with no OpenClaw dispatch observed; terminalized without retry",
+      "failure_phase": "actor",
+      "pair_id": "20260901T021125Z-pair-s2302",
+      "seed": 2302,
+      "status": "failed_contract",
+      "verification_digest": "49b09cf8cec1e93fa9fcaad6c72e8c12ca0e4ebfd62ec0edd2d3f421aff114bd"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 138,
+          "first_pass_contract_failures": 0,
+          "flow_status": "failed_contract",
+          "model_calls": 46,
+          "model_failures": 0,
+          "output_tokens": 218441,
+          "provider_total_tokens": 6308206,
+          "repair_calls": 0,
+          "repair_tokens": 0,
+          "replay_state_hash": "e09947f77f07d62c041d9b9aa56bab84477b6d535e83794b30c71f59d2cd01dd",
+          "run_id": "20260901T063740Z-control-s2303",
+          "successful_repairs": 0,
+          "terminal_repair_failures": 0,
+          "turns": 46
+        },
+        "theatre": {
+          "day": 138,
+          "first_pass_contract_failures": 1,
+          "flow_status": "ready",
+          "model_calls": 77,
+          "model_failures": 0,
+          "output_tokens": 79364,
+          "provider_total_tokens": 7725690,
+          "repair_calls": 1,
+          "repair_tokens": 28382,
+          "replay_state_hash": "c4001f55a05b54be68fb3b1dd9acb230a81c02afabc04ec7e51d730cd39ebe9a",
+          "run_id": "20260901T063740Z-theatre-s2303",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 46
+        }
+      },
+      "economic_result": null,
+      "failing_arm": "control",
+      "failure_message": "OpenClaw model call failed (1): GatewayClientRequestError: Error: CLI transcript compaction failed for openai/gpt-5.6-sol: Summarization failed: terminated",
+      "failure_phase": "control",
+      "pair_id": "20260901T063740Z-pair-s2303",
+      "seed": 2303,
+      "status": "failed_contract",
+      "verification_digest": "13b012c178fdcb22b412d2eb3e07f1a50d6850f2f2dbdde6047d3d10909fbfb4"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 99,
+          "first_pass_contract_failures": 1,
+          "flow_status": "ready",
+          "model_calls": 34,
+          "model_failures": 0,
+          "output_tokens": 156333,
+          "provider_total_tokens": 4341829,
+          "repair_calls": 1,
+          "repair_tokens": 110220,
+          "replay_state_hash": "4e301199e13d4e60575b0f9d014561eb829159a40c2763f46a03b75181eb3229",
+          "run_id": "20260901T104029Z-control-s2304",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 33
+        },
+        "theatre": {
+          "day": 96,
+          "first_pass_contract_failures": 1,
+          "flow_status": "failed_contract",
+          "model_calls": 59,
+          "model_failures": 1,
+          "output_tokens": 64635,
+          "provider_total_tokens": 5027924,
+          "repair_calls": 1,
+          "repair_tokens": 89238,
+          "replay_state_hash": "c33b649c8d8456a813264a06c2dbace887d9edbc91eb731e1a8a9a0a7744f792",
+          "run_id": "20260901T104029Z-theatre-s2304",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 32
+        }
+      },
+      "economic_result": null,
+      "failing_arm": "theatre",
+      "failure_message": "gateway restarted during the frozen original invocation; auto-continuation preserved and charged but not applied",
+      "failure_phase": "actor",
+      "pair_id": "20260901T104029Z-pair-s2304",
+      "seed": 2304,
+      "status": "failed_contract",
+      "verification_digest": "b877471dfbdaf171379c8e88c1b3d8f4544d7da9ad98c047b862aac4766bf107"
+    },
+    {
+      "arms": {
+        "control": {
+          "day": 240,
+          "first_pass_contract_failures": 0,
+          "flow_status": "failed_contract",
+          "model_calls": 80,
+          "model_failures": 0,
+          "output_tokens": 336113,
+          "provider_total_tokens": 11967190,
+          "repair_calls": 0,
+          "repair_tokens": 0,
+          "replay_state_hash": "e80ca57a7a96604e99d9c5515e5f93915054e627742a0ac0e7cc8453f9e0d4e4",
+          "run_id": "20260901T171724Z-control-s2305",
+          "successful_repairs": 0,
+          "terminal_repair_failures": 0,
+          "turns": 80
+        },
+        "theatre": {
+          "day": 240,
+          "first_pass_contract_failures": 1,
+          "flow_status": "ready",
+          "model_calls": 138,
+          "model_failures": 0,
+          "output_tokens": 140695,
+          "provider_total_tokens": 16429127,
+          "repair_calls": 1,
+          "repair_tokens": 71785,
+          "replay_state_hash": "da51ad8fbdb108cdd94c61be04a1a7de61b4cd7cd76a3549a7a8b50b9d34a475",
+          "run_id": "20260901T171724Z-theatre-s2305",
+          "successful_repairs": 1,
+          "terminal_repair_failures": 0,
+          "turns": 80
+        }
+      },
+      "economic_result": null,
+      "failing_arm": "control",
+      "failure_message": "OpenClaw model call failed (1): GatewayClientRequestError: Error: CLI transcript compaction failed for openai/gpt-5.6-sol: Summarization failed: Our servers are currently overloaded. Please try again later.",
+      "failure_phase": "control",
+      "pair_id": "20260901T171724Z-pair-s2305",
+      "seed": 2305,
+      "status": "failed_contract",
+      "verification_digest": "1b780531f46480a18cda5db8cbb3f8735d04a6f9ba6d16c7ecdd19b25e1422e7"
+    }
+  ],
+  "reliability": {
+    "failed_pairs_by_arm": {
+      "control": 3,
+      "theatre": 2
+    },
+    "failed_pairs_by_phase": {
+      "actor": 2,
+      "control": 3
+    },
+    "usage_and_repairs_by_arm": {
+      "control": {
+        "first_pass_contract_failures": 2,
+        "model_calls": 218,
+        "output_tokens": 968716,
+        "provider_total_tokens": 29077121,
+        "repair_calls": 2,
+        "repair_tokens": 317067,
+        "successful_repairs": 1,
+        "terminal_repair_failures": 1
+      },
+      "theatre": {
+        "first_pass_contract_failures": 5,
+        "model_calls": 370,
+        "output_tokens": 376635,
+        "provider_total_tokens": 35159241,
+        "repair_calls": 5,
+        "repair_tokens": 304652,
+        "successful_repairs": 5,
+        "terminal_repair_failures": 0
+      }
+    }
+  },
+  "report_type": "official_v3_terminal_campaign",
+  "schema_version": 1
+}

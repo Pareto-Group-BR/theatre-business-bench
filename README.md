@@ -128,12 +128,20 @@ PYTHONPATH=src python3 -m theatre_business_bench.cli audit-v3-preregistration
 python3 -m unittest tests.test_v3 tests.test_v3_executor -v
 ```
 
-State: `EXECUTOR_PUBLISHED / OFFICIAL_CAMPAIGN_RUNNING / NO_AGGREGATE`. Pair
-creation freezes the exact v3 bytes and remains offline. Activation is a
-separate audited transition that accepts only an untouched pair from seeds
-2301–2305 and the exact clean commit published at `origin/main`. Seed 2301 was
-created and activated from the published executor; partial checkpoints are not
-results or winners.
+State: `OFFICIAL_CAMPAIGN_TERMINAL / NO_ECONOMIC_RESULT / NO_WINNER / NO_AGGREGATE`.
+All five official pairs are immutable `failed_contract` evidence and pass their
+independent replay/usage verification. No pair produced `result.json`, so no
+partial score is promoted into an economic comparison. The deterministic
+terminal bundle records reliability, repairs, usage, and causes while keeping
+every aggregate economic field null:
+
+- [Standalone v3 terminal campaign](v3-terminal-campaign.html)
+- [Executive Markdown evidence](docs/V3_TERMINAL_CAMPAIGN.md)
+- [Canonical machine-readable evidence](v3-terminal-campaign.json)
+
+Pair creation froze the exact v3 bytes offline. Activation accepted only an
+untouched pair from seeds 2301–2305 and the exact clean commit published at
+`origin/main`; those seeds must not be resumed or recreated.
 See [`docs/EXPERIMENT_PROTOCOL_V3.md`](docs/EXPERIMENT_PROTOCOL_V3.md) and
 [`preregistration/v3.json`](preregistration/v3.json).
 
