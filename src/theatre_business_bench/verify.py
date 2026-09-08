@@ -81,6 +81,12 @@ def _gateway_restart_reason(receipt: dict[str, Any]) -> str | None:
     return None
 
 
+def _jsonl_bytes(rows: list[dict[str, Any]]) -> bytes:
+    return "".join(
+        json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
+    ).encode()
+
+
 def _restart_protected_records(
     pair_dir: Path, run_dir: Path, other_run_dir: Path
 ) -> dict[str, dict[str, Any]]:
@@ -192,9 +198,16 @@ def _verify_gateway_restart_transaction(
         if (
             not isinstance(target_rows, list)
             or _jsonl_sha256(target_rows) != target["files"][name]
-            or current_record.get("sha256") != target["files"][name]
             or len(target_rows) != int(source_record.get("rows", -1)) + 1
         ):
+            errors.append(f"{arm}: gateway-restart {name} transaction hash mismatch")
+            continue
+        if name == "ledger":
+            persisted = path.read_bytes() if path.exists() else b""
+            transaction_persisted = persisted.startswith(_jsonl_bytes(target_rows))
+        else:
+            transaction_persisted = _file_record(path).get("sha256") == target["files"][name]
+        if not transaction_persisted:
             errors.append(f"{arm}: gateway-restart {name} transaction hash mismatch")
             continue
         if source_record.get("sha256") is None:
@@ -267,6 +280,10 @@ def _verify_gateway_restart_transaction(
         "pair": _file_record(pair_path),
         "protected_artifacts": protected,
     }
+    # The shared ledger may legitimately have later append-only rows from other
+    # official pairs. The loop above has already bound this transaction's exact
+    # persisted prefix; retain the receipt's immutable ledger snapshot here.
+    observed_final["files"]["ledger"] = final["files"]["ledger"]
     if observed_final != final:
         errors.append(f"{arm}: gateway-restart final transaction receipt mismatch")
     return errors

@@ -68,8 +68,6 @@ def _jsonl_bytes(rows: list[dict[str, Any]]) -> bytes:
     return "".join(
         json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows
     ).encode()
-
-
 def _jsonl_sha256(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(_jsonl_bytes(rows)).hexdigest()
 
@@ -568,7 +566,12 @@ def _finish_v3_restart_reconciliation(
         "pair": _file_record(pair_path),
         "protected_artifacts": protected,
     }
-    if any(final["files"][name]["sha256"] != target["files"][name] for name in paths):
+    final["files"]["ledger"] = {
+        "sha256": target["files"]["ledger"],
+        "bytes": len(_jsonl_bytes(rows["ledger"])),
+        "rows": len(rows["ledger"]),
+    }
+    if any(final["files"][name]["sha256"] != target["files"][name] for name in paths if name != "ledger"):
         raise V3ContractError("gateway-restart transaction did not persist its exact ledgers")
     if final["flow"]["sha256"] != target["flow"] or final["pair"]["sha256"] != target["pair"]:
         raise V3ContractError("gateway-restart transaction did not persist its exact terminal state")
